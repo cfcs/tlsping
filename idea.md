@@ -39,8 +39,10 @@ The `proxy` cannot alter incoming messages without the `client` being able to de
 
 The `proxy` is able to replace records transmitted by the client with queued PONGs.
 The user can prevent the `proxy` from doing so by either
-  1) Never queuing PONGs
-  2) Executing a renegotiation of the ephemeral session keys (and thus invalidating any queued PONGs by changing the "TLS client MAC key") before transmitting message records. Renegotiation must be done before transmitting messages each time PONGs have been queued. In this model, queueing PONGs can be thought of as "logging out," and the `client` would be required to renegotiate the ephemeral session keys every time it "logs in" in order to preserve the security property of the `proxy` being unable to replace transmitted records with PONGs.
+- Never queuing PONGs
+- Executing a renegotiation of the ephemeral session keys (and thus invalidating any queued PONGs by changing the "TLS client MAC key") before transmitting message records.
+  Renegotiation must be done before transmitting messages each time PONGs have been queued.
+  In this model, queueing PONGs can be thought of as "logging out," and the `client` would be required to renegotiate the ephemeral session keys every time it "logs in" in order to preserve the security property of the `proxy` being unable to replace transmitted records with PONGs.
 
 The `proxy` cannot _modify_ transmitted records without invalidating the MAC (generated using the "TLS client MAC key") and thus causing the `server` to drop the connection.
 
