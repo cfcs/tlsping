@@ -59,9 +59,9 @@ The MAC is computed as follows: [(details in RFC 5246)](https://tools.ietf.org/h
                             TLSCompressed.fragment);
 ```
 
-The `MAC_write_key` protects the integrity of the records and is known only to the `client`, which makes the `proxy` unable to substitute the messages sent by the `client` with its own messages.
+The (`client`) `MAC_write_key` protects the integrity of the records and is known only to the `client` and the `server`, which makes the `proxy` unable to substitute the messages sent by the `client` with its own messages.
 
-TLS uses different sets of encryption and MAC keys for "write" and "read" operations respectively, which makes `proxy` unable to substitute incoming messages with PONGs that were queued with the `proxy`.
+TLS uses different sets of encryption and MAC keys for "client write" and "server write" operations respectively, which makes `proxy` unable to substitute incoming messages with PONGs that were queued with the `proxy`. See [RFC 5246 section 6.3](https://tools.ietf.org/html/rfc5246#section-6.3) for details.
 
 Since the `seq_num` is not sent in cleartext, we need to continually tag records sent over the `control channel` with the associated `seq_num` to enable the `proxy` to keep track of which PONGs are invalidated by outgoing messages.
 
