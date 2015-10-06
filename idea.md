@@ -20,6 +20,8 @@ The `client` encrypts the deterministic PONG messages ahead of time and sends th
 
 The `client` reveals the TLS sequence number of each of the PONG records (`seq_num`) as well as the `seq_num` for each regular data packet to enable the `proxy` to determine which PONG messages will be appropriate in a given setting. If the `proxy` receives a regular packet whose `seq_num` it has already replaced using a PONG, the `proxy` must inform the `client` that it needs to resend the record under a different `seq_num` over the `control channel` and reject the record.
 
+Incoming messages are queued for the user and must be ACK'ed before they're deleted from the queue. This enables a user to keep a reliable and consistent backlog of incoming messages.
+
 ### Record structure details
 
 Excerpt from [RFC 5246](https://tools.ietf.org/html/rfc5246#page-22)
@@ -59,26 +61,44 @@ The MAC is computed as follows: [(details in RFC 5246)](https://tools.ietf.org/h
 
 The `MAC_write_key` protects the integrity of the records and is known only to the `client`, which makes the `proxy` unable to substitute the messages sent by the `client` with its own messages.
 
+TLS uses different sets of encryption and MAC keys for "write" and "read" operations respectively, which makes `proxy` unable to substitute incoming messages with PONGs that were queued with the `proxy`.
+
+Since the `seq_num` is not sent in cleartext, we need to continually tag records sent over the `control channel` with the associated `seq_num` to enable the `proxy` to keep track of which PONGs are invalidated by outgoing messages.
+
 ### Protocol considerations
 
 - It is important that regular protocol messages sent by the `client` do not span across several records since the `proxy` has the capability to replace any valid record with a PONG record. For IRC this means that the plaintext content of all records must end with `0x0d 0a`, as must all PONGs.
 
-- The control channel must implement the following operations:
+- The control channel must implement the following operations from the `client`:
+
   - `CONNECT` `{address}` `{port}`
-    - returns `CONNECT_ANSWER {connection id}`
+    - return:
+      - on success: `CONNECT_ANSWER {connection id} {address} {port}`
+      - on failure: `CONNECT_ERROR {address} {port}`
+    - action: Establish a TCP connection to the given address and port
 
   - `OUTGOING` `{connection id}` `{seq_num offset}` `seq_num count` `{encrypted TLS records}`
-    - no return value
+    - return: none
+      - unless PONGs have already been with seq_num lower than `{seq_num offset} + {seq_num count}` in which case a `STATUS_ANSWER` for the `{connection id}` is returned
+    - action: drop PONGs with `{seq_num}` lower than `{seq_num offset} + `{seq_num count}`, if there are any
 
   - `QUEUE` `{connection id}` `{seq_num offset}` `{count seq_num}` `{PONG record [seq_num offset]}` `{PONG record [seq_num ...]}` `{PONG record [seq_num offset + count seq_num]}`
-    - return TODO
+    - return: `STATUS_ANSWER` for the `{connection id}`
+    - action: store the PONG records in the queue for the given `{connection id}`
+
+  - `ACK` `{connection id}` `{seq_num offset}`
+    - return: none
+    - action: the `proxy` erases all queued PONGs up to and including `{seq_num offset}`
+      - If the `{connection id}` has failed, a `{seq_num offset}` of `0` may be used to erase all `proxy` state related to `{connection id}`
 
   - `STATUS` `{first connection id}` `{last connection id}`
-    - returns `STATUS_ANSWER` `{count of status tuples to follow}` and `[[` {connection id}` `{address}` `{port}` `{current seq_num}` `{count of queued PONG records}` `]]` for each connected `{connection id}`. if a connection has failed, `seq_num = 0` is sent
+    - return: `STATUS_ANSWER` `{count of status tuples to follow}` and `[[` {connection id}` `{address}` `{port}` `{current seq_num}` `{count of queued PONG records}` `]]` for each connected `{connection id}`. if a connection has failed, `seq_num = 0` is sent
+    - action: none
 
   - `FETCH` `{connection id}` `{seq_num offset}` `{max seq_num}`
-    - `INCOMING` `{seq_num offset}` `{seq_num count}` `{received TLS records}`
+    - return: `INCOMING` `{count of queued PONGs}` `{seq_num offset}` `{seq_num count}` `{received TLS records}`
 
   - `SUBSCRIBE` `{connection id}`
-    - continually sends `INCOMING` messages for each received record
+    - return: see *action*
+    - action: continually sends `INCOMING` messages for each received record for the duration of the lifetimes of either `control channel` or `{connection id}`
 
