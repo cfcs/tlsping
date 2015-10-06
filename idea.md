@@ -1,3 +1,7 @@
+# tls-pongd
+
+_A daemon that responds to PINGs over TLS._
+
 ### Terminology
 - TLS v1.2 RFC: [TLS v1.2 protocol](https://tools.ietf.org/html/rfc5246)
 - supported cipher suites: `tls-pongd` is implemented for the following CipherSuites, see [TLS v1.2: CipherSuites](https://tools.ietf.org/html/rfc3268) for details
@@ -9,6 +13,7 @@
 - `control channel`: encrypted connection between `client` and `proxy`
 - `connection id`: the numeric ID of an open connection
 - `pong interval`: the interval for how often the `client` should dispatch pong messages, in seconds
+- `seq_num`: the TLS record sequence number
 
 ### General outline
 
@@ -23,6 +28,21 @@ The `client` reveals the TLS sequence number of each of the PONG records (`seq_n
 Incoming messages are queued for the user and must be ACK'ed before they're deleted from the queue. This enables a user to keep a reliable and consistent backlog of incoming messages.
 
 If no `control channel` subscribing to a `connection id` is connected, the `proxy` sends a queued PONG record every time `pong interval` seconds has elapsed and increments the `seq_num` counter for that `connection id`.
+
+Depending on the implementation it is likely possible to have several `clients` connected at the same time, subscribing to the same connections and multiplexing transmitted messages. Multiplayer TLS; fun things can come out of that.
+
+### Threat model
+
+The `proxy` is considered a potential adversary.
+
+The `proxy` cannot alter incoming messages without the `client` being able to detect them since it does not know the "TLS server MAC key", so the `client` will be able to reject incoming messages with an invalid MAC.
+
+The `proxy` is able to replace records transmitted by the client with queued PONGs.
+The user can prevent the `proxy` from doing so by either
+  1) Never queuing PONGs
+  2) Executing a renegotiation of the ephemeral session keys (and thus invalidating any queued PONGs by changing the "TLS client MAC key") before transmitting message records. Renegotiation must be done before transmitting messages each time PONGs have been queued. In this model, queueing PONGs can be thought of as "logging out," and the `client` would be required to renegotiate the ephemeral session keys every time it "logs in" in order to preserve the security property of the `proxy` being unable to replace transmitted records with PONGs.
+
+The `proxy` cannot _modify_ transmitted records without invalidating the MAC (generated using the "TLS client MAC key") and thus causing the `server` to drop the connection.
 
 ### Record structure details
 
@@ -103,4 +123,9 @@ Since the `seq_num` is not sent in cleartext, we need to continually tag records
   - `SUBSCRIBE` `{connection id}`
     - return: see *action*
     - action: continually sends `INCOMING` messages for each received record for the duration of the lifetimes of either `control channel` or `{connection id}`
+
+
+### Notes
+
+This concept is not strictly tied to TLS and may, depending on the cipher suites employed, be used on other record-oriented encrypted transport protocols. TODO research.
 
