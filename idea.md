@@ -1,4 +1,4 @@
-=== Terminology
+### Terminology
 - TLS v1.2 RFC: [TLS v1.2 protocol](https://tools.ietf.org/html/rfc5246)
 - supported cipher suites: `tls-pongd` is implemented for the following CipherSuites, see [TLS v1.2: CipherSuites](https://tools.ietf.org/html/rfc3268) for details
   - `TLS_DHE_RSA_AES_256_CBC_SHA`
@@ -10,7 +10,8 @@
 - `connection id`: the numeric ID of an open connection
 - `pong interval`: the interval for how often the `client` should dispatch pong messages
 
-=== General outline
+### General outline
+
 The user wants to stay connected to a service which requires PONG messages sent over TLS at deterministic intervals and using deterministic PONG messages.
 
 `tls-pongd` accomplishes this by running a `proxy` on an always-available untrusted machine, tunneling the end-to-end-encrypted TLS connection from the `client` to the `server`.
@@ -19,7 +20,8 @@ The `client` encrypts the deterministic PONG messages ahead of time and sends th
 
 The `client` reveals the TLS sequence number of each of the PONG records (`seq_num`) as well as the `seq_num` for each regular data packet to enable the `proxy` to determine which PONG messages will be appropriate in a given setting. If the `proxy` receives a regular packet whose `seq_num` it has already replaced using a PONG, the `proxy` must inform the `client` that it needs to resend the record under a different `seq_num` over the `control channel` and reject the record.
 
-=== Record structure details
+### Record structure details
+
 Excerpt from [RFC 5246](https://tools.ietf.org/html/rfc5246#page-22)
 ```
       struct {
@@ -57,7 +59,8 @@ The MAC is computed as follows: [(details in RFC 5246)](https://tools.ietf.org/h
 
 The `MAC_write_key` protects the integrity of the records and is known only to the `client`, which makes the `proxy` unable to substitute the messages sent by the `client` with its own messages.
 
-=== Protocol considerations
+### Protocol considerations
+
 - It is important that regular protocol messages sent by the `client` do not span across several records since the `proxy` has the capability to replace any valid record with a PONG record. For IRC this means that the plaintext content of all records must end with `0x0d 0a`, as must all PONGs.
 
 - The control channel must implement the following operations:
