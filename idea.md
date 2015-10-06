@@ -8,7 +8,7 @@
 - `client`: `tls-pong-client`
 - `control channel`: encrypted connection between `client` and `proxy`
 - `connection id`: the numeric ID of an open connection
-- `pong interval`: the interval for how often the `client` should dispatch pong messages
+- `pong interval`: the interval for how often the `client` should dispatch pong messages, in seconds
 
 ### General outline
 
@@ -21,6 +21,8 @@ The `client` encrypts the deterministic PONG messages ahead of time and sends th
 The `client` reveals the TLS sequence number of each of the PONG records (`seq_num`) as well as the `seq_num` for each regular data packet to enable the `proxy` to determine which PONG messages will be appropriate in a given setting. If the `proxy` receives a regular packet whose `seq_num` it has already replaced using a PONG, the `proxy` must inform the `client` that it needs to resend the record under a different `seq_num` over the `control channel` and reject the record.
 
 Incoming messages are queued for the user and must be ACK'ed before they're deleted from the queue. This enables a user to keep a reliable and consistent backlog of incoming messages.
+
+If no `control channel` subscribing to a `connection id` is connected, the `proxy` sends a queued PONG record every time `pong interval` seconds has elapsed and increments the `seq_num` counter for that `connection id`.
 
 ### Record structure details
 
@@ -71,7 +73,7 @@ Since the `seq_num` is not sent in cleartext, we need to continually tag records
 
 - The control channel must implement the following operations from the `client`:
 
-  - `CONNECT` `{address}` `{port}`
+  - `CONNECT` `{PONG interval}` `{address}` `{port}`
     - return:
       - on success: `CONNECT_ANSWER {connection id} {address} {port}`
       - on failure: `CONNECT_ERROR {address} {port}`
@@ -92,7 +94,7 @@ Since the `seq_num` is not sent in cleartext, we need to continually tag records
       - If the `{connection id}` has failed, a `{seq_num offset}` of `0` may be used to erase all `proxy` state related to `{connection id}`
 
   - `STATUS` `{first connection id}` `{last connection id}`
-    - return: `STATUS_ANSWER` `{count of status tuples to follow}` and `[[` {connection id}` `{address}` `{port}` `{current seq_num}` `{count of queued PONG records}` `]]` for each connected `{connection id}`. if a connection has failed, `seq_num = 0` is sent
+    - return: `STATUS_ANSWER` `{count of status tuples to follow}` and `[[` {connection id}` `{PONG interval}` `{address}` `{port}` `{current seq_num}` `{count of queued PONG records}` `]]` for each connected `{connection id}`. if a connection has failed, `seq_num = 0` is sent
     - action: none
 
   - `FETCH` `{connection id}` `{seq_num offset}` `{max seq_num}`
