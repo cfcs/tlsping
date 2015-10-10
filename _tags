@@ -1,0 +1,9 @@
+true : annot, bin_annot
+true : warn_error(+1..49)
+true : warn(+A-4-6-7-9-40-42-44-48)
+<src> : include
+
+<tls_ping_client.{ml,byte,native}>: package(astring), \
+  package(hex), package(lwt), package(lwt.syntax), package(nocrypto), \
+  package(tls), package(tls.lwt), \
+  package(rresult), syntax(camlp4o)

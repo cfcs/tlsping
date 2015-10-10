@@ -3,4 +3,7 @@
 *.o
 *.cmx
 *.swp
+_build/
+*.native
+*.install
 

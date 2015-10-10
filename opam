@@ -1,0 +1,23 @@
+opam-version: "0.1"
+name:         "tlspingd"
+homepage:     "https://github.com/cfcs/tlspongd"
+dev-repo:     "https://github.com/cfcs/tlspongd.git"
+bug-reports:  "https://github.com/cfcs/tlspongd/issues"
+author:       ["Luther Blissett"]
+maintainer:   ["Luther Blissett"]
+license:      "proprietary"
+
+build: [
+  [ "ocaml" "pkg/git.ml" ]
+  [ "ocaml" "pkg/build.ml" "native=%{ocaml-native}%"
+                           "native-dynlink=%{ocaml-native-dynlink}%" ]
+]
+depends: [
+  "ocamlfind"
+  "tls" {>= "0.6.0"}
+  "nocrypto" {>= "0.5.0"}
+  "x509" {>= "0.4.0"}
+  "lwt"
+  "rresult"
+  "hex"
+]
