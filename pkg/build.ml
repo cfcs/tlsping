@@ -5,4 +5,4 @@
 let () = Pkg.describe "tlspingd" ~builder:`OCamlbuild [
     Pkg.lib "pkg/META";
     Pkg.bin ~auto:true "tls_ping_client";
-    Pkg.doc "idea.md"; ]
+    Pkg.doc "readme.md"; ]

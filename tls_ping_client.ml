@@ -1,5 +1,6 @@
 open Tls
 open Rresult
+open Lwt
 
 type generate_msg_error =
 | TLS_handshake_not_finished
@@ -26,4 +27,48 @@ let generate_msg tls_state payload (seq_num : int64)
   | _ ->
     Error TLS_not_acceptable_ciphersuite
   end
+
+let handle_irc_client client_in client_out =
+  let _ = client_out in (* TODO unused variable so far *)
+  match_lwt Socks.parse_socks4 client_in with
+  | `Invalid_request ->
+      Lwt_io.eprintf "invalid request!\n" (*TODO failwith / logging *)
+  | `Socks4a {port ; _} | `Socks4 {port ; _} ->
+      Lwt_io.eprintf "got request for port %d!!!\n" port
+
+let handle_client (unix_fd, sockaddr) () =
+  begin match sockaddr with
+  | Lwt_unix.ADDR_INET ( _ (*inet_addr*), port) ->
+    Printf.printf "Port: %d\n" port
+  | Lwt_unix.ADDR_UNIX _ -> ()
+  end ;
+  let client_in  = Lwt_io.of_fd Input  unix_fd
+  and client_out = Lwt_io.of_fd Output unix_fd in
+  handle_irc_client client_in client_out
+
+let listener_service host port =
+  let open Lwt_unix in
+  gethostbyname host >>= fun host_entry ->
+  let host_inet_addr = Array.get host_entry.h_addr_list 0 in
+  let s = socket host_entry.h_addrtype SOCK_STREAM 0 in
+  let () = setsockopt s SO_REUSEADDR true in
+  let () = bind s (ADDR_INET (host_inet_addr, port )) in
+  let () = listen s 10 in
+  let rec loop s =
+    match_lwt
+      try_lwt accept s >>= fun c -> return (`Client c) with
+      (*| Unix.Unix_error (e, f, p) -> return (`Error "e")*)
+      | _ -> return (`Error "exn")
+    with
+    | `Client c ->
+        (Lwt.async (handle_client c) ;
+        loop s)
+    | `Error _ -> failwith "listener failed, should retry"
+  in
+  loop s
+
+let () =
+  (* TODO Lwt_daemon.daemonize + Lwt_daemon.logger *)
+  let host = "127.0.0.1" and port = 6667 in
+  Lwt_main.run (listener_service host port)
 
