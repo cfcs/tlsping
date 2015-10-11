@@ -30,11 +30,8 @@ let generate_msg tls_state payload (seq_num : int64)
 
 let handle_irc_client client_in client_out =
   let _ = client_out in (* TODO unused variable so far *)
-  match_lwt Socks.parse_socks4 client_in with
-  | `Invalid_request ->
-      Lwt_io.eprintf "invalid request!\n" (*TODO failwith / logging *)
-  | `Socks4a {port ; _} | `Socks4 {port ; _} ->
-      Lwt_io.eprintf "got request for port %d!!!\n" port
+  let _ = client_in in
+  return ()
 
 let handle_client (unix_fd, sockaddr) () =
   begin match sockaddr with
@@ -44,7 +41,12 @@ let handle_client (unix_fd, sockaddr) () =
   end ;
   let client_in  = Lwt_io.of_fd Input  unix_fd
   and client_out = Lwt_io.of_fd Output unix_fd in
-  handle_irc_client client_in client_out
+  match_lwt Socks.parse_socks4 client_in with
+  | `Invalid_request ->
+      Lwt_io.eprintf "invalid request!\n" (*TODO failwith / logging *)
+  | `Socks4 {port ;user_id; address } ->
+      Lwt_io.eprintf "got request for user '%s' host '%s' port %d!!!\n" user_id address port >>= fun () ->
+      handle_irc_client client_in client_out
 
 let listener_service host port =
   let open Lwt_unix in
