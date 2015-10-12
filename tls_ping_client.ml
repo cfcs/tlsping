@@ -1,3 +1,4 @@
+open Tlsping
 open Tls
 open Rresult
 open Lwt
@@ -28,47 +29,68 @@ let generate_msg tls_state payload (seq_num : int64)
     Error TLS_not_acceptable_ciphersuite
   end
 
-let connect_proxy proxy certs =
+let connect_proxy (host , port) certs =
   Tlsping.(tls_config certs) >>= function { authenticator ; ciphers ; version ; hashes ; certificates } ->
   let config =Tls.Config.client ~authenticator ~ciphers ~version ~hashes ~certificates () in
-  try
-    return @@ R.ok @@ Tls_lwt.connect_ext config proxy
+  Lwt_io.printf "connecting to proxy\n" >>
+  try_lwt
+    create_socket host >>= function
+    | Error () -> return @@ R.error "unable to resolve proxy hostname"
+    | Ok (fd, proxy) ->
+    (* the ServerName on the cert might not match the actual hostname we use,
+     * so we need to provide it in ~host: below *)
+      Lwt_unix.connect fd (ADDR_INET (proxy, port)) >>
+      Tls_lwt.Unix.client_of_fd config ~host:"proxy.example.org" fd (* TODO "proxy.example.org" should obviously be a parameter, testing only! *)
+      >>= fun tls_t -> return @@ R.ok Tls_lwt.(of_t tls_t)
   with
   | Tls_lwt.Tls_failure err ->
-    return @@ R.error @@ Tls.Engine.string_of_failure err
+    return @@ R.error @@ "Tls_failure: " ^
+    begin match err with
+    | `Error (`AuthenticationFailure (`InvalidServerName _ as valerr)) ->
+      "ServerName mismatch: " ^ X509.Validation.validation_error_to_string valerr
+    | _ -> Tls.Engine.string_of_failure err
+    end
 
 let handle_irc_client client_in client_out target proxy_details certs =
-  let _ = client_out in (* TODO unused variable so far *)
-  let _ = client_in in
   connect_proxy proxy_details certs >>= function
   | Error err ->
     Lwt_io.eprintf "err: %s\n" err
   | Ok proxy ->
-  let _ = proxy , target in
-  Lwt_io.eprintf "connected to proxy\n" >>= fun () ->
+  let _ = target in
+  Lwt_io.eprintf "connected to proxy\n" >>
+  begin match serialize_connect 60 (target.Socks.address, target.port) with
+  | None -> Lwt_io.eprintf "error: unable to serialize connect"
+  | Some msg ->
+  Lwt_io.write_line (snd proxy) msg >>
+  Lwt_io.read_line (fst proxy) >>= fun servlol ->
+  Lwt_io.printf "Received: %s" servlol >>
+  Lwt_io.write client_out @@ Socks.socks_response 443 true >>
+  Lwt_io.printf "going to read from client:\n" >>
+  Lwt_io.read_line client_in >>= fun client_lol ->
+  Lwt_io.printf "Received from client: %s\n" client_lol >>
   return ()
+  end
 
 let handle_client (unix_fd, sockaddr) proxy certs () =
   begin match sockaddr with
   | Lwt_unix.ADDR_INET ( _ (*inet_addr*), port) ->
-    Printf.printf "Port: %d\n" port
-  | Lwt_unix.ADDR_UNIX _ -> ()
-  end ;
+    Lwt_io.printf "Incoming connection, src port: %d\n" port
+  | Lwt_unix.ADDR_UNIX _ -> return ()
+  end >>
   let client_in  = Lwt_io.of_fd Input  unix_fd
   and client_out = Lwt_io.of_fd Output unix_fd in
   match_lwt Socks.parse_socks4 client_in with
   | `Invalid_request ->
       Lwt_io.eprintf "invalid request!\n" (*TODO failwith / logging *)
   | `Socks4 ({port ; user_id; address } as target) ->
-      Lwt_io.eprintf "got request for user '%s' host '%s' port %d!!!\n" user_id address port >>= fun () ->
+      Lwt_io.eprintf "got request for user '%s' host '%s' port %d!!!\n" user_id address port >>
       handle_irc_client client_in client_out target proxy certs
 
 let listener_service (host,port) proxy certs =
   let open Lwt_unix in
-(*  let open_socket = 1 in*)
-  gethostbyname host >>= fun host_entry ->
-  let host_inet_addr = Array.get host_entry.h_addr_list 0 in
-  let s = socket host_entry.h_addrtype SOCK_STREAM 0 in
+  create_socket host >>= function
+  | Error () -> failwith "unable to resolve listen addr"
+  | Ok (s , host_inet_addr) ->
   let () = setsockopt s SO_REUSEADDR true in
   let () = bind s (ADDR_INET (host_inet_addr, port )) in
   let () = listen s 10 in

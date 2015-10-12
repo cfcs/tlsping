@@ -38,7 +38,7 @@ Depending on the implementation it is likely possible to have several `clients` 
 
 The `proxy` is considered a potential adversary.
 
-The `proxy` cannot alter incoming messages without the `client` being able to detect them since it does not know the "TLS server MAC key", so the `client` will be able to reject incoming messages with an invalid MAC. The MAC'd value includes the sequence number, so it is not possible for the `proxy` to alter the order of incoming messages without invalidating the MAC for the reordered messages.
+The `proxy` cannot alter incoming messages without the `client` being able to detect the alterations since it does not know the "TLS server MAC key", so the `client` will be able to reject incoming messages with an invalid MAC. The MAC'd value includes the sequence number, so it is not possible for the `proxy` to alter the order of incoming messages without invalidating the MAC for the reordered messages.
 
 The `proxy` is able to replace records transmitted by the client with queued PINGs.
 The user can prevent the `proxy` from doing so by either
@@ -50,7 +50,7 @@ If the `proxy` replaces an outgoing message, the server will respond with a PONG
 
 The `proxy` cannot _modify_ transmitted records without invalidating the MAC (generated using the "TLS client MAC key") and thus causing the `server` to drop the connection.
 
-The `server` can always silently drop transmitted messages, so we do not consider a malicious server as part of the scope for our threat model. End-to-end-encrypted overlay protocols like OTR 
+The `server` can always silently drop transmitted messages, so we do not consider a malicious server as part of the scope for our threat model. End-to-end-encrypted overlay protocols like OTR may be used within the TLS connection to provide actual conversation integrity.
 
 ### Record structure details
 

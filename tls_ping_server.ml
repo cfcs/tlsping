@@ -1,19 +1,38 @@
 open Lwt
+open Tlsping
 
-let handle_server (ic, oc) addr () =
-  let _ = addr in (* TODO *)
-  Lwt_io.eprintf "got an authenticated connection from a client!\n" >>= fun () ->
-  Lwt_io.read_line ic >>= fun line ->
-  Lwt_io.write_line oc line
+let handle_server (ic, (oc : Lwt_io.output_channel)) addr () =
+  let _ = addr , oc in (* TODO *)
+  Lwt_io.eprintf "got an authenticated connection from a client!\n" >>
+  let rec loop needed_len acc =
+  Lwt_io.printf "entering loop\n" >>
+  Lwt_io.read ~count:needed_len ic >>= fun msg ->
+  (* handle EOF: *)
+  if msg = "" then return () else
+  let msg = String.concat "" [acc ; msg] in
+  begin match unserialized_of_client_msg msg with
+  | `Need_more needed_len ->
+    Lwt_io.printf "read incomplete packet, need bytes: %d\n" needed_len
+    >> loop needed_len msg
+  | `Connect (ping_interval, address, port) ->
+    Lwt_io.printf "CONNECT request for ping interval %d, host '%s':%d\n"
+                  ping_interval address port
+  | `Invalid _ ->
+    Lwt_io.eprintf "got an INVALID packet, TODO kill connection\n"
+  end
+  >> loop 2 ""
+  in loop 2 ""
+  >> Lwt_io.eprintf "shutting down loop\n"
 
-let server_service listen_host listen_port (ca_public_cert : string) proxy_public_cert proxy_secret_key =
+let server_service listen_host listen_port (ca_public_cert : string) proxy_public_cert proxy_secret_key : 'a Lwt.t =
+  let open Lwt_unix in
   Tlsping.(tls_config (ca_public_cert , proxy_public_cert , proxy_secret_key)) >>= function {authenticator ; ciphers ; version ; hashes ; certificates} ->
   let config = Tls.Config.(server ~authenticator ~ciphers ~version ~hashes ~certificates ()) in
-(*TODO why doesn't this throw an error if you omit the authenticator? *)
-  let open Lwt_unix in
-  gethostbyname listen_host >>= fun host_entry ->
-  let host_inet_addr = Array.get host_entry.h_addr_list 0 in
-  let s = socket host_entry.h_addrtype SOCK_STREAM 0 in
+  Tlsping.create_socket listen_host >>= function
+  | Error () ->
+      Lwt_io.eprintf "create_socket: fail\n"
+      >> return None
+  | Ok (s , host_inet_addr) ->
   let () = setsockopt s SO_REUSEADDR true in
   let () = bind s (ADDR_INET (host_inet_addr , listen_port)) in
   let () = listen s 10 in
@@ -22,7 +41,7 @@ let server_service listen_host listen_port (ca_public_cert : string) proxy_publi
       try_lwt
         Tls_lwt.accept_ext config s >|= fun r -> `R r
       with
-        | Unix.Unix_error (e, f, p) -> return (`L (Unix.(error_message e) ^ f ^ p))
+        | Unix.Unix_error (e, f, p) -> return (`L ("unix: " ^ Unix.(error_message e) ^ f ^ p))
         | Tls_lwt.Tls_alert a -> return (`L (Tls.Packet.alert_type_to_string a))
         | Tls_lwt.Tls_failure f -> return (`L (Tls.Engine.string_of_failure f))
         | _ (*exn*) -> return (`L "loop: exception")
@@ -31,10 +50,11 @@ let server_service listen_host listen_port (ca_public_cert : string) proxy_publi
       let () = async (handle_server channels addr) in
       loop s
     | `L (msg) ->
-      Lwt_io.eprintf "server fucked up: %s\n" msg >> loop s
-  in
-  loop s >>= fun () ->
-  Lwt_io.eprintf "well that fucked up, end of infinite loop\n"
+      Lwt_io.eprintf "server fucked up: %s\n" msg
+      >> loop s
+  in loop s
+  >> Lwt_io.eprintf "quitting\n"
+  >> return (Some ())
 
 let run_server a b c d e =
   Lwt_main.run (server_service a b c d e)
