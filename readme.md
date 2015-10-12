@@ -135,3 +135,28 @@ Since the `seq_num` is not sent in cleartext, we need to continually tag records
 
 This concept is not strictly tied to TLS or IRC and may, depending on the cipher suites employed, and the protocol, be used on other record-oriented encrypted transport protocols. TODO research.
 
+# OCaml implementation
+
+### Usage
+
+You will need some X509 certificates, generated using [ocaml-certify](https://github.com/yomimono/ocaml-certify) or some other tool:
+- A CA ("Certificate Authority"); two files: the secret _key_ (which may be kept on offline storage) and the public _certificate_ (which is used by both `client` and `proxy`)
+  - `selfsign --ca -k ca.secret.key -c ca.public.certificate my.friends.example.org`
+- The client will need the CA `ca.public.certificate` (but **not** the _key_)
+  - It will also need a client _certificate_ signed by the CA, and the _key_ the corresponds to this client _certificate_
+    - The client makes a CSR (Certificate Signing Request):
+      `csr --out client.csr -k client.secret.key client.example.org "A friend of ours"`
+    - The client transfers this CSR file to the CA which signs it:
+      `sign --client --cain ca.public.certificate --key ca.secret.key --csrin client.csr --out client.public.certificate`
+- The proxy will need the CA _certificate_ (but **not** the _key_)
+  - It will also need a server _certificate_ signed by the CA, and the _key_ that corresponds to this server _certificate_
+  - The proxy makes a CSR (Certificate Signing Request):
+    `csr --out proxy.csr -k proxy.secret.key proxy.example.org "One of our proxies"`
+  - The proxy transfers this CSR file to the CA which signs it:
+    `sign --cain ca.public.certificate --key ca.secret.key --csrin proxy.csr --out proxy.public.certificate`
+- The CA transfers the resulting certificates to the respective key holders
+
+At the end of the excercise the parties must have:
+Client: `ca.public.certificate`, `client.secret.key`, `client.public.certificate`
+Proxy: `ca.public.certificate`, `proxy.secret.key`, `proxy.public.certificate`
+
