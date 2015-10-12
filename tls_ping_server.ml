@@ -7,9 +7,8 @@ let handle_server (ic, oc) addr () =
   Lwt_io.write_line oc line
 
 let server_service listen_host listen_port (ca_public_cert : string) proxy_public_cert proxy_secret_key =
-  X509_lwt.authenticator (`Ca_file ca_public_cert) >>= fun authenticator ->
-  X509_lwt.private_of_pems ~cert:proxy_public_cert ~priv_key:proxy_secret_key >>= fun server_cert ->
-  let config = Tls.Config.(server ~authenticator ~version:(TLS_1_2,TLS_1_2) ~hashes:[`SHA256] ~certificates:(`Single server_cert) ~ciphers:Ciphers.supported () (*TODO put the config in shared file*) ) in
+  Tlsping.(tls_config (ca_public_cert , proxy_public_cert , proxy_secret_key)) >>= function {authenticator ; ciphers ; version ; hashes ; certificates} ->
+  let config = Tls.Config.(server ~authenticator ~ciphers ~version ~hashes ~certificates ()) in
 (*TODO why doesn't this throw an error if you omit the authenticator? *)
   let open Lwt_unix in
   gethostbyname listen_host >>= fun host_entry ->

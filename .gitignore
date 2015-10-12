@@ -3,6 +3,8 @@
 *.o
 *.cmx
 *.swp
+*.certificate
+*.key
 _build/
 *.native
 *.install

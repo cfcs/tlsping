@@ -28,11 +28,9 @@ let generate_msg tls_state payload (seq_num : int64)
     Error TLS_not_acceptable_ciphersuite
   end
 
-let connect_proxy proxy (ca_public_cert , public_cert , secret_key ) =
-  X509_lwt.authenticator (`Ca_file ca_public_cert) >>= fun authenticator ->
-  X509_lwt.private_of_pems ~cert:public_cert ~priv_key:secret_key >>= fun cert ->
-  (*^-- TODO verify that it's a client cert *)
-    let config = Tls.Config.(client ~version:(TLS_1_2,TLS_1_2) ~hashes:[`SHA256] ~authenticator ~certificates:(`Single cert) ~ciphers:Ciphers.supported (*TODO restrict, put config in shared file*) () ) in
+let connect_proxy proxy certs =
+  Tlsping.(tls_config certs) >>= function { authenticator ; ciphers ; version ; hashes ; certificates } ->
+  let config =Tls.Config.client ~authenticator ~ciphers ~version ~hashes ~certificates () in
   try
     return @@ R.ok @@ Tls_lwt.connect_ext config proxy
   with
