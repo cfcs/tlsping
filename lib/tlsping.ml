@@ -44,7 +44,7 @@ let opcode_of_server_operation = function
 let c_prepend_length_and_opcode opcode msg =
   let msg = string_of_bitstring msg in
   BITSTRING {
-    1 + String.length msg : 16 : int, bigendian
+    1 + String.length msg : 16 : int, bigendian, unsigned
   ; opcode_of_client_operation opcode : 8 : string
   ; msg : -1 : string
   } |> string_of_bitstring
@@ -52,9 +52,8 @@ let c_prepend_length_and_opcode opcode msg =
 let serialize_connect ping_interval (address, port) : string option =
   try Some (BITSTRING
   { ping_interval                      : 16 : int, bigendian
-  ; String.(length address)            : 8  : int, bigendian
-  ; address : (8 * String.length address)   : string
   ; port                               : 16 : int, bigendian
+  ; address : (8 * String.length address)   : string
   } |> c_prepend_length_and_opcode Connect)
   with
   | Bitstring.Construct_failure _ -> None
@@ -68,8 +67,52 @@ let serialize_outgoing conn_id seq_num msg =
   ; msg     : -1 : string
   } |> c_prepend_length_and_opcode Outgoing
 
-let unserialized_of_client_msg msg =
-  let open Bitstring in
+type connection_status =
+  { conn_id : int32
+  ; ping_interval : int
+  ; address : string
+  ; port : int
+  ; seq_num : int64
+  ; queue_length : int32
+  }
+
+let s_prepend_length_and_opcode opcode msg =
+  let msg = string_of_bitstring msg in
+  BITSTRING {
+    1 + String.length msg             : 16 : int, bigendian, unsigned
+  ; opcode_of_server_operation opcode :  8 : string
+  ; msg : -1 : string
+  } |> string_of_bitstring
+
+let serialize_status_answer connections =
+  let rec serialize (acc : bytes list)= function
+  | { conn_id ; ping_interval ; address ; port ; seq_num ; queue_length } :: tl ->
+      serialize (string_of_bitstring (BITSTRING
+      { conn_id       : 32 : int, unsigned, bigendian
+      ; ping_interval : 16 : int, unsigned, bigendian
+      ; port          : 16 : int, unsigned, bigendian
+      ; String.length address :  8 : int, unsigned, bigendian
+      ; address       : -1 : string
+      ; seq_num       : 64 : int, unsigned, bigendian
+      ; queue_length  : 32 : int, unsigned, bigendian (* amount of PINGs queued *)
+      }) :: acc) tl
+  | [] -> Bytes.concat "" acc
+          |> bitstring_of_string |> s_prepend_length_and_opcode Status_answer
+  in serialize connections
+
+let serialize_incoming msg =
+  BITSTRING {
+    msg : -1 : string
+  } |> s_prepend_length_and_opcode Incoming
+
+let serialize_connect_answer conn_id address port =
+  BITSTRING
+  { conn_id  : 32 : int, unsigned, bigendian
+  ; port     : 16 : int, unsigned, bigendian
+  ; address  : -1 : string
+  } |> s_prepend_length_and_opcode Connect_answer
+
+let read_msg_len msg =
   let msg_len = String.length msg in
   if 2 > msg_len then `Need_more (2 - msg_len)
   else
@@ -83,23 +126,80 @@ let unserialized_of_client_msg msg =
   else if length < payload_len
   then `Invalid `Too_long (* should never happen *)
   else
+    `Payload payload
+
+let unserialized_of_client_msg msg =
+  match read_msg_len msg with
+  | (`Need_more _ | `Invalid _) as ret -> ret
+  | `Payload payload ->
   (* we have the bytes we need, attempt to parse them *)
   bitmatch payload with
-  | { opcode        : 8  : string,
+
+  | { opcode        :  8 : string,
         check(opcode = opcode_of_client_operation Connect)
-    ; ping_interval : 16 : int, bigendian
-    ; length        : 8  : int, bigendian
-    ; address       : length * 8 : string
-    ; port          : 16 : int, bigendian
+    ; ping_interval : 16 : int, unsigned, bigendian
+    ; port          : 16 : int, unsigned, bigendian
+    ; address       : -1 : string
     } -> `Connect (ping_interval, address, port)
+
   | { opcode  :  8 : string,
         check(opcode = opcode_of_client_operation Outgoing)
-    ; conn_id : 32 : int, bigendian
-    ; seq_num : 32 : int, bigendian
-    ; count   : 16 : int, bigendian
+    ; conn_id : 32 : int, unsigned, bigendian, check(conn_id <> 0l)
+    ; seq_num : 64 : int, unsigned, bigendian
+    ; count   : 16 : int, unsigned, bigendian (* amount of TLS records in msg *)
     ; msg     : -1 : string
     } -> `Outgoing (conn_id , seq_num , count , msg)
+
   (* TODO handle more opcodes *)
+  | { _ } -> `Invalid `Invalid_packet
+
+let unserialized_of_server_msg msg =
+  match read_msg_len msg with
+  | (`Need_more _ | `Invalid _) as ret -> ret
+  | `Payload payload ->
+  bitmatch payload with
+
+  | { opcode   :  8 : string,
+        check(opcode = opcode_of_server_operation Connect_answer)
+    ; conn_id  : 32 : int, unsigned, bigendian
+    ; port     : 16 : int, unsigned, bigendian
+    ; address  : -1 : string
+    } -> `Connect_answer (conn_id , address, port)
+
+  | { opcode :  8 : string,
+        check(opcode = opcode_of_server_operation Incoming)
+    ; msg    : -1 : string
+    } -> `Incoming msg
+
+  | { opcode :  8 : string,
+        check(opcode = opcode_of_server_operation Status_answer)
+    ; tuples : -1 : bitstring
+    } ->
+      let rec parse_tuples tuples acc =
+        if 0 = Bitstring.bitstring_length tuples then
+          `Status_answer acc
+        else
+        (bitmatch Bitstring.takebits (32 + 16 + 8) tuples with
+        | { conn_id       : 32 : int, unsigned, bigendian
+          ; ping_interval : 16 : int, unsigned, bigendian
+          ; port          : 16 : int, unsigned, bigendian
+          ; addr_len      :  8 : int, unsigned, bigendian, bind(addr_len * 8)
+          } as header ->
+            (bitmatch Bitstring.takebits (addr_len + 16 +32 + 32) tuples with
+            | { address      : addr_len : string
+              ; seq_num      : 64 : int, unsigned, bigendian
+              ; count_queued : 32 : int, unsigned, bigendian (* amount of PINGs queued *)
+              } as body ->
+                parse_tuples
+                (takebits (bitstring_length header + bitstring_length body) tuples)
+                 @@ (conn_id , ping_interval, address, port, seq_num, count_queued) :: acc
+            | { _ } -> `Invalid `Invalid_packet
+            )
+        | { _ } -> `Invalid `Invalid_packet
+        )
+      in
+      parse_tuples tuples []
+
   | { _ } -> `Invalid `Invalid_packet
 
 let create_socket host =

@@ -2,7 +2,9 @@ open Tlsping
 open Tls
 open Rresult
 open Lwt
-
+(*TODO
+let states = Hashtbl.create 10
+*)
 type generate_msg_error =
 | TLS_handshake_not_finished
 | TLS_not_acceptable_ciphersuite
@@ -77,9 +79,10 @@ let handle_irc_client client_in client_out target proxy_details certs =
   begin match serialize_connect 60 (target.Socks.address, target.port) with
   | None -> Lwt_io.eprintf "error: unable to serialize connect"
   | Some connect_msg ->
+
   Lwt_io.write (snd proxy) connect_msg >>= fun () ->
-  Lwt.async (handle_outgoing client_in (snd proxy)) ;
   Lwt_io.read (fst proxy) >>= fun connect_answer ->
+  Lwt.async (handle_outgoing client_in (snd proxy)) ;
   Lwt_io.printf "Received: %s" connect_answer >>
   Lwt_io.write client_out "yoyoyo\n" >>
   Lwt_io.printf "going to read from client:\n" >>

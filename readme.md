@@ -101,10 +101,10 @@ Since the `seq_num` is not sent in cleartext, we need to continually tag records
 
 - The control channel must implement the following operations from the `client`:
 
-  - `CONNECT` `{PING interval}` `{address}` `{port}`
+  - `CONNECT` `{PING interval}` `{port}` `{address}`
     - return:
-      - on success: `CONNECT_ANSWER {connection id} {address} {port}`
-      - on failure: `CONNECT_ERROR {address} {port}`
+      - on success: `CONNECT_ANSWER {connection id} `{port}` `{address}`
+      - on failure: `CONNECT_ANSWER 0 `{port}` `{address}`
     - action: Establish a TCP connection to the given address and port
 
   - `OUTGOING` `{connection id}` `{seq_num offset}` `seq_num count` `{encrypted TLS records}`
@@ -122,7 +122,7 @@ Since the `seq_num` is not sent in cleartext, we need to continually tag records
       - If the `{connection id}` has failed, a `{seq_num offset}` of `0` may be used to erase all `proxy` state related to `{connection id}`
 
   - `STATUS` `{first connection id}` `{last connection id}`
-    - return: `STATUS_ANSWER` `{count of status tuples to follow}` and `[[` {connection id}` `{PING interval}` `{address}` `{port}` `{current seq_num}` `{count of queued PING records}` `]]` for each connected `{connection id}`. if a connection has failed, `seq_num = 0` is sent
+    - return: `STATUS_ANSWER` `{count of status tuples to follow}` and `[[` {connection id}` `{PING interval}` `{port}` `{length of address}` `{address}` `{current seq_num}` `{count of queued PING records}` `]]` for each connected `{connection id}`. if a connection has failed, `seq_num = 0` is sent
     - action: none
 
   - `FETCH` `{connection id}` `{seq_num offset}` `{max seq_num}`

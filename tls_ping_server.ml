@@ -57,7 +57,7 @@ let handle_server (ic, (oc : Lwt_io.output_channel)) addr () =
                   ping_interval address port
     >> cmd_connect params
   | `Outgoing (conn_id , seq_num , count , msg) ->
-      Lwt_io.printf "OUTGOING for conn %ld seq %ld count %d msg: '%s'\n"
+      Lwt_io.printf "OUTGOING for conn %ld seq %Ld count %d msg: '%s'\n"
         conn_id seq_num count msg
   | `Invalid _ ->
     Lwt_io.eprintf "got an INVALID packet, TODO kill connection\n"
