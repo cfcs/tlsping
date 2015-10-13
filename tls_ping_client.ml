@@ -29,7 +29,7 @@ let generate_msg tls_state payload (seq_num : int64)
     Error TLS_not_acceptable_ciphersuite
   end
 
-let connect_proxy (host , port) certs =
+let connect_proxy client_out (host , port) certs =
   Tlsping.(tls_config certs) >>= function { authenticator ; ciphers ; version ; hashes ; certificates } ->
   let config =Tls.Config.client ~authenticator ~ciphers ~version ~hashes ~certificates () in
   Lwt_io.printf "connecting to proxy\n" >>
@@ -39,32 +39,49 @@ let connect_proxy (host , port) certs =
     | Ok (fd, proxy) ->
     (* the ServerName on the cert might not match the actual hostname we use,
      * so we need to provide it in ~host: below *)
-      Lwt_unix.connect fd (ADDR_INET (proxy, port)) >>
-      Tls_lwt.Unix.client_of_fd config ~host:"proxy.example.org" fd (* TODO "proxy.example.org" should obviously be a parameter, testing only! *)
-      >>= fun tls_t -> return @@ R.ok Tls_lwt.(of_t tls_t)
+        Lwt_unix.connect fd (ADDR_INET (proxy, port)) >>
+        Tls_lwt.Unix.client_of_fd config ~host:"proxy.example.org" fd (* TODO "proxy.example.org" should obviously be a parameter, testing only! *)
+        >>= fun tls_t ->
+        Lwt_io.write client_out @@ Socks.socks_response true >>
+        return @@ R.ok Tls_lwt.(of_t tls_t)
   with
+  | Unix.Unix_error (Unix.ECONNREFUSED, f_n , _) ->
+      Lwt_io.write client_out @@ Socks.socks_response false >>
+      return @@ R.error @@ "Unix error: connection refused: " ^ f_n
   | Tls_lwt.Tls_failure err ->
-    return @@ R.error @@ "Tls_failure: " ^
-    begin match err with
-    | `Error (`AuthenticationFailure (`InvalidServerName _ as valerr)) ->
-      "ServerName mismatch: " ^ X509.Validation.validation_error_to_string valerr
-    | _ -> Tls.Engine.string_of_failure err
-    end
+      return @@ R.error @@ "Tls_failure: " ^
+      begin match err with
+      | `Error (`AuthenticationFailure (`InvalidServerName _ as valerr)) ->
+        "ServerName mismatch: " ^ X509.Validation.validation_error_to_string valerr
+      | _ -> Tls.Engine.string_of_failure err
+      end
+
+let handle_outgoing client_in proxy_out () =
+  let rec loop () =
+    (* TODO handle disconnect / broken line: *)
+    Lwt_io.read_line client_in >>= fun line ->
+    (* TODO encrypt line *)
+    let line = serialize_outgoing 1l 1l line in
+    Lwt_io.write proxy_out line
+    >> loop ()
+  in loop ()
 
 let handle_irc_client client_in client_out target proxy_details certs =
-  connect_proxy proxy_details certs >>= function
+  connect_proxy client_out proxy_details certs >>= function
   | Error err ->
     Lwt_io.eprintf "err: %s\n" err
   | Ok proxy ->
   let _ = target in
   Lwt_io.eprintf "connected to proxy\n" >>
+  (* TODO handle graceful reconnection *)
   begin match serialize_connect 60 (target.Socks.address, target.port) with
   | None -> Lwt_io.eprintf "error: unable to serialize connect"
-  | Some msg ->
-  Lwt_io.write_line (snd proxy) msg >>
-  Lwt_io.read_line (fst proxy) >>= fun servlol ->
-  Lwt_io.printf "Received: %s" servlol >>
-  Lwt_io.write client_out @@ Socks.socks_response 443 true >>
+  | Some connect_msg ->
+  Lwt_io.write (snd proxy) connect_msg >>= fun () ->
+  Lwt.async (handle_outgoing client_in (snd proxy)) ;
+  Lwt_io.read (fst proxy) >>= fun connect_answer ->
+  Lwt_io.printf "Received: %s" connect_answer >>
+  Lwt_io.write client_out "yoyoyo\n" >>
   Lwt_io.printf "going to read from client:\n" >>
   Lwt_io.read_line client_in >>= fun client_lol ->
   Lwt_io.printf "Received from client: %s\n" client_lol >>

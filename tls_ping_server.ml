@@ -1,6 +1,44 @@
 open Lwt
 open Tlsping
 
+type connection =
+  { interval  : int
+  ; remote_fd : Lwt_unix.file_descr
+  ; address   : string
+  ; port      : int
+  ; seq_num   : int
+  ; incoming  : string Queue.t
+  ; outgoing  : (int * string) Queue.t
+  }
+
+let connections = Hashtbl.create 10
+
+let cmd_connect (`Connect (interval , address , port)) =
+  Tlsping.create_socket address >>= function
+  | Error () ->
+      Lwt_io.eprintf "cmd_connect: create_socket: fail\n"
+      (* TODO send Connect_error interval address port *)
+      >> return ()
+  | Ok (remote_fd , host_inet_addr) ->
+  Lwt_io.printf "trying to connect to '%s':%d\n" address port >>
+  (try_lwt
+    Lwt_unix.connect remote_fd (ADDR_INET (host_inet_addr , port))
+  with
+  | Unix.Unix_error ( _ , f_n, _) ->
+     Lwt_io.eprintf "Unix error '%s' when connecting to target %s:%d\n" f_n address port
+  ) >>
+  let id = 1 + Hashtbl.length connections in (*TODO proper counter *)
+  Hashtbl.add connections id
+  { interval
+  ; remote_fd
+  ; address
+  ; port
+  ; seq_num  = 0
+  ; incoming = Queue.create ()
+  ; outgoing = Queue.create ()
+  } ;
+  return ()
+
 let handle_server (ic, (oc : Lwt_io.output_channel)) addr () =
   let _ = addr , oc in (* TODO *)
   Lwt_io.eprintf "got an authenticated connection from a client!\n" >>
@@ -14,9 +52,13 @@ let handle_server (ic, (oc : Lwt_io.output_channel)) addr () =
   | `Need_more needed_len ->
     Lwt_io.printf "read incomplete packet, need bytes: %d\n" needed_len
     >> loop needed_len msg
-  | `Connect (ping_interval, address, port) ->
+  | `Connect (ping_interval, address, port) as params ->
     Lwt_io.printf "CONNECT request for ping interval %d, host '%s':%d\n"
                   ping_interval address port
+    >> cmd_connect params
+  | `Outgoing (conn_id , seq_num , count , msg) ->
+      Lwt_io.printf "OUTGOING for conn %ld seq %ld count %d msg: '%s'\n"
+        conn_id seq_num count msg
   | `Invalid _ ->
     Lwt_io.eprintf "got an INVALID packet, TODO kill connection\n"
   end

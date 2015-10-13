@@ -39,16 +39,16 @@ let connect_client (proxy_fd_in : Lwt_io.input_channel)
   with
   | End_of_file -> return false
 
-let socks_response port (success : bool) = String.concat ""
-  (* this response is not fully compliant; check field 4 *)
-  [ "\x00" (* field 1: null byte*)
+let socks_response (success : bool) = String.concat ""
+  (* this response is not fully compliant; but it's what ssh does *)
+  (* field 1: null byte*)
+  [ "\x00"
   (* field 2: status, 1 byte 0x5a = granted; 0x5b = rejected/failed : *)
-  ; if success then "\x5a" else "\x5b"
+  ; (if success then "\x5a" else "\x5b")
   (* field 3: bigendian port: *)
-  ; port land 0xff |> char_of_int |> String.make 0
-  ; port  lsr 8    |> char_of_int |> String.make 0
+  ; String.make 2 '\x00'
   (* field 4: "network byte order ip address"*)
-  ; "\x00\x00\x00\x01" (* IP *)
+  ; String.make 4 '\x00' (* IP *)
   ]
 
 type socks4_request =

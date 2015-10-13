@@ -41,17 +41,32 @@ let opcode_of_server_operation = function
 | Status_answer  -> "\x62"
 | Incoming       -> "\x63"
 
+let c_prepend_length_and_opcode opcode msg =
+  let msg = string_of_bitstring msg in
+  BITSTRING {
+    1 + String.length msg : 16 : int, bigendian
+  ; opcode_of_client_operation opcode : 8 : string
+  ; msg : -1 : string
+  } |> string_of_bitstring
+
 let serialize_connect ping_interval (address, port) : string option =
-  try Some (BITSTRING {
-    String.(6+ length address) : 16 : int, bigendian
-  ; opcode_of_client_operation Connect : 8  : string
-  ; ping_interval                      : 16 : int, bigendian
+  try Some (BITSTRING
+  { ping_interval                      : 16 : int, bigendian
   ; String.(length address)            : 8  : int, bigendian
   ; address : (8 * String.length address)   : string
   ; port                               : 16 : int, bigendian
-  } |> string_of_bitstring)
+  } |> c_prepend_length_and_opcode Connect)
   with
   | Bitstring.Construct_failure _ -> None
+
+let serialize_outgoing conn_id seq_num msg =
+  (* right now we only send one message *)
+  BITSTRING
+  { conn_id : 32 : int, bigendian
+  ; seq_num : 32 : int, bigendian (* seq_num offset *)
+  ; 1       : 16 : int, bigendian (* record count *)
+  ; msg     : -1 : string
+  } |> c_prepend_length_and_opcode Outgoing
 
 let unserialized_of_client_msg msg =
   let open Bitstring in
@@ -77,6 +92,13 @@ let unserialized_of_client_msg msg =
     ; address       : length * 8 : string
     ; port          : 16 : int, bigendian
     } -> `Connect (ping_interval, address, port)
+  | { opcode  :  8 : string,
+        check(opcode = opcode_of_client_operation Outgoing)
+    ; conn_id : 32 : int, bigendian
+    ; seq_num : 32 : int, bigendian
+    ; count   : 16 : int, bigendian
+    ; msg     : -1 : string
+    } -> `Outgoing (conn_id , seq_num , count , msg)
   (* TODO handle more opcodes *)
   | { _ } -> `Invalid `Invalid_packet
 
