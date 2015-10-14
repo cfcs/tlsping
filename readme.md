@@ -137,9 +137,21 @@ Since the `seq_num` is not sent in cleartext, we need to continually tag records
 
 This concept is not strictly tied to TLS or IRC and may, depending on the cipher suites employed, and the protocol, be used on other record-oriented encrypted transport protocols. TODO research.
 
-# OCaml implementation
+# OCaml implementation: SOCKS4 proxy
 
-### Usage
+### Description
+
+The OCaml implementation of the `client` in this repository is implemented as a SOCKS4/SOCKS4a proxy.
+
+The host, port, and sha256 fingerprint of the x509 (TLS) certificate of `server` are provided in the initial SOCKS request by the "actual client".
+
+The sha256 fingerprint is configured as the "user_id" to send to the SOCKS proxy. This enables users to configure the fingerprints from within their client applications directly.
+
+The control channel between `client` and `proxy` is protected by TLS using both client and server certificates, and they share a common (self-signed) CA.
+
+The `proxy` only allows access to existing connections etablished in previous sessions using the same client certificate.
+
+### Installation
 
 You will need some X509 certificates, generated using [ocaml-certify](https://github.com/yomimono/ocaml-certify) or some other tool:
 - A CA ("Certificate Authority"); two files: the secret _key_ (which may be kept on offline storage) and the public _certificate_ (which is used by both `client` and `proxy`)

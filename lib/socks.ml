@@ -1,11 +1,14 @@
 (* A SOCKS4a helper. Wraps a Lwt file_descr
-   https://en.wikipedia.org/wiki/SOCKS#SOCKS4a
+
+http://ftp.icm.edu.pl/packages/socks/socks4/SOCKS4.protocol
+
+https://en.wikipedia.org/wiki/SOCKS#SOCKS4a
 *)
 open Lwt
 
-let connect_client (proxy_fd_in : Lwt_io.input_channel)
-                   (proxy_fd_out : Lwt_io.output_channel)
-                   hostname port : bool Lwt.t =
+let connect_client (proxy_fd_in   : Lwt_io.input_channel)
+                   (proxy_fd_out  : Lwt_io.output_channel)
+                    hostname port : bool Lwt.t =
   let message = String.concat ""
     [ (* field 1: SOCKS version *)
     "\x04"
@@ -40,11 +43,13 @@ let connect_client (proxy_fd_in : Lwt_io.input_channel)
   | End_of_file -> return false
 
 let socks_response (success : bool) = String.concat ""
-  (* this response is not fully compliant; but it's what ssh does *)
   (* field 1: null byte*)
   [ "\x00"
   (* field 2: status, 1 byte 0x5a = granted; 0x5b = rejected/failed : *)
   ; (if success then "\x5a" else "\x5b")
+  (* Note: the next two fields are "ignored" according to the RFC,
+   * but socat (among other clients) refuses to parse the response
+   * if it's not zeroed out, so that's what we do (same as ssh): *)
   (* field 3: bigendian port: *)
   ; String.make 2 '\x00'
   (* field 4: "network byte order ip address"*)
@@ -54,11 +59,14 @@ let socks_response (success : bool) = String.concat ""
 type socks4_request =
   { port    : int
   ; address : string
-  ; user_id : string }
+  (* tlsping uses the "user_id" field in socks4 to hold the hex-encoded
+   * sha256 fingerprint of the x509 certificate of address:port *)
+  (* TODO: could also have "fp:XXX" and "ca:my.ca.file" here ? *)
+  ; fingerprint : string }
 
 let parse_socks4 (client_fd_in : Lwt_io.input_channel) =
   let header = Bytes.make 8 '8' in
-  try_lwt
+  try_lwt(
   (* read minimum amount of bytes needed*)
   Lwt_io.read_into_exactly client_fd_in header 0 (1+1+2+4) >>= fun () ->
   if not (header.[0] = '\x04' && header.[1] = '\x01')
@@ -76,7 +84,10 @@ let parse_socks4 (client_fd_in : Lwt_io.input_channel) =
   read_until_0 [] 255
   >>= function
   | None -> return `Invalid_request (*no user_id / user_id > 255 *)
-  | Some user_id ->
+  (* user_id is used as hex-encoded sha256 fingerprint: *)
+  | Some fingerprint when String.(64 <> length fingerprint)
+    -> return @@ `Invalid_fingerprint fingerprint
+  | Some fingerprint ->
   begin match header.[4] = '\x00'
            && header.[5] = '\x00'
            && header.[6] = '\x00' with
@@ -88,14 +99,17 @@ let parse_socks4 (client_fd_in : Lwt_io.input_channel) =
   | false ->
     return @@ `Addr (String.concat "." List.(map
       (fun i -> string_of_int (int_of_char header.[i])) [ 4; 5; 6; 7 ] ))
-  end >>= (function
-  | `Addr address ->
-    return @@ `Socks4 {
-      port
-    ; address
-    ; user_id
-  }
-  | `Invalid_request as ir -> return ir )
-  with
+  end >>=
+    (function
+    | `Addr address ->
+      return @@ `Socks4 {
+        port
+      ; address
+      ; fingerprint
+      }
+    | (`Invalid_request | `Invalid_fingerprint _ ) as ir
+      -> return ir
+    )
+  )with
   | End_of_file -> return `Invalid_request
 

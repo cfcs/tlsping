@@ -61,11 +61,16 @@ let serialize_connect ping_interval (address, port) : string option =
 let serialize_outgoing conn_id seq_num msg =
   (* right now we only send one message *)
   BITSTRING
-  { conn_id : 32 : int, bigendian
-  ; seq_num : 32 : int, bigendian (* seq_num offset *)
-  ; 1       : 16 : int, bigendian (* record count *)
+  { conn_id : 32 : int, unsigned, bigendian
+  ; seq_num : 64 : int, unsigned, bigendian (* seq_num offset *)
+  ; 1       : 16 : int, unsigned, bigendian (* record count *)
   ; msg     : -1 : string
   } |> c_prepend_length_and_opcode Outgoing
+
+let serialize_subscribe conn_id =
+  BITSTRING
+  { conn_id : 32 : int, unsigned, bigendian
+  } |> c_prepend_length_and_opcode Subscribe
 
 type connection_status =
   { conn_id : int32
@@ -129,6 +134,7 @@ let read_msg_len msg =
     `Payload payload
 
 let unserialized_of_client_msg msg =
+  (* parses CONNECT ; OUTGOING ; QUEUE ; ACK ; STATUS ; FETCH ; SUBSCRIBE *)
   match read_msg_len msg with
   | (`Need_more _ | `Invalid _) as ret -> ret
   | `Payload payload ->
@@ -150,10 +156,16 @@ let unserialized_of_client_msg msg =
     ; msg     : -1 : string
     } -> `Outgoing (conn_id , seq_num , count , msg)
 
+  | { opcode  :  8 : string,
+        check(opcode = opcode_of_client_operation Subscribe)
+    ; conn_id : 32 : int, unsigned, bigendian, check(conn_id <> 0l)
+    } -> `Subscribe conn_id
+
   (* TODO handle more opcodes *)
   | { _ } -> `Invalid `Invalid_packet
 
 let unserialized_of_server_msg msg =
+  (* parses CONNECT_ANSWER ; INCOMING ; STATUS_ANSWER *)
   match read_msg_len msg with
   | (`Need_more _ | `Invalid _) as ret -> ret
   | `Payload payload ->
@@ -205,6 +217,7 @@ let unserialized_of_server_msg msg =
 let create_socket host =
   let open Lwt in
   let open Lwt_unix in
+  (* TODO handle try gethostbyname with | Not_found *)
   Lwt_unix.gethostbyname host >>= fun host_entry ->
   if 0 = Array.length host_entry.h_addr_list then
     return @@ R.error ()

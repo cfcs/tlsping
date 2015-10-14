@@ -1,6 +1,0 @@
-make && ./tls_ping_server.native ./ca.public.certificate ./proxy.public.certificate ./proxy.secret.key
-
-make && ./tls_ping_client.native 127.0.0.1 ./ca.public.certificate ./client.public.certificate ./client.secret.key 
-
-socat - socks4a:localhost:github.com:443,socksport=6667
-

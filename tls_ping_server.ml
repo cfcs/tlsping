@@ -3,17 +3,28 @@ open Tlsping
 
 type connection =
   { interval  : int
-  ; remote_fd : Lwt_unix.file_descr
+  ; oc        : Lwt_io.output_channel
+  ; ic        : Lwt_io.input_channel
   ; address   : string
   ; port      : int
-  ; seq_num   : int
+  ; seq_num   : int64
   ; incoming  : string Queue.t
-  ; outgoing  : (int * string) Queue.t
+  ; outgoing  : (int64 * string) Queue.t
   }
 
 let connections = Hashtbl.create 10
 
-let cmd_connect (`Connect (interval , address , port)) =
+let handle_incoming ic oc incoming () =
+  let rec loop () =
+    Lwt_io.read ~count:512 ic >>= fun input ->
+    if "" = input then raise End_of_file else
+    Lwt_io.printf "handle_incoming: %d bytes read\n" String.(length input) >>= fun () ->
+    Queue.add input incoming ;
+    Lwt_io.write oc (serialize_incoming input) (* TODO automatically subscribe?*)
+    >> loop ()
+  in loop ()
+
+let cmd_connect client_oc (`Connect (interval , address , port)) =
   Tlsping.create_socket address >>= function
   | Error () ->
       Lwt_io.eprintf "cmd_connect: create_socket: fail\n"
@@ -27,42 +38,65 @@ let cmd_connect (`Connect (interval , address , port)) =
   | Unix.Unix_error ( _ , f_n, _) ->
      Lwt_io.eprintf "Unix error '%s' when connecting to target %s:%d\n" f_n address port
   ) >>
-  let id = 1 + Hashtbl.length connections in (*TODO proper counter *)
-  Hashtbl.add connections id
-  { interval
-  ; remote_fd
-  ; address
-  ; port
-  ; seq_num  = 0
-  ; incoming = Queue.create ()
-  ; outgoing = Queue.create ()
-  } ;
+  let id = 1 +  Hashtbl.length connections in (*TODO proper counter *)
+  let us = { (* TODO tie this to the TLS client cert *)
+      interval
+    ; oc = Lwt_io.of_fd Output remote_fd
+    ; ic = Lwt_io.of_fd Input  remote_fd
+    ; address
+    ; port
+    ; seq_num  = 0L
+    ; incoming = Queue.create ()
+    ; outgoing = Queue.create ()
+    } 
+  in
+  Hashtbl.add connections id us ;
+  (* Start a separate thread to save incoming data: *)
+  Lwt_io.write client_oc (serialize_connect_answer Int32.(of_int id) address port)
+  >>= fun () ->
+  Lwt.async (handle_incoming us.ic client_oc us.incoming) ;
   return ()
 
 let handle_server (ic, (oc : Lwt_io.output_channel)) addr () =
+  (** main function for handling a connection from an authenticated client **)
+  (* TODO tie all state to the client certificate to allow multiple users *)
   let _ = addr , oc in (* TODO *)
+  let hex s = begin match Hex.of_string s with `Hex s -> s end in
   Lwt_io.eprintf "got an authenticated connection from a client!\n" >>
   let rec loop needed_len acc =
-  Lwt_io.printf "entering loop\n" >>
+  Lwt_io.printf "entering loop, reading %d B\n" needed_len >>
   Lwt_io.read ~count:needed_len ic >>= fun msg ->
   (* handle EOF: *)
   if msg = "" then return () else
+  Lwt_io.printf "client->server msg: %d: [%s]\t\t%s\n" String.(length msg)
+    (hex acc) (hex msg) >>
   let msg = String.concat "" [acc ; msg] in
   begin match unserialized_of_client_msg msg with
   | `Need_more needed_len ->
-    Lwt_io.printf "read incomplete packet, need bytes: %d\n" needed_len
+    Lwt_io.printf "client->server: read incomplete packet, need bytes: %d\n" needed_len
     >> loop needed_len msg
+  | `Subscribe conn_id ->
+      let _ = conn_id in
+      (* TODO Lwt.async (handle_subscribe conn_id) ; *)
+      loop 2 ""
   | `Connect (ping_interval, address, port) as params ->
     Lwt_io.printf "CONNECT request for ping interval %d, host '%s':%d\n"
                   ping_interval address port
-    >> cmd_connect params
+    >> cmd_connect oc params
+    >> loop 2 ""
   | `Outgoing (conn_id , seq_num , count , msg) ->
-      Lwt_io.printf "OUTGOING for conn %ld seq %Ld count %d msg: '%s'\n"
-        conn_id seq_num count msg
+      Lwt_io.printf "OUTGOING for conn %ld seq %Ld count %d msg: %s\n"
+        conn_id seq_num count (begin match Hex.of_string msg with `Hex s->s end)
+        >>= fun () ->
+      let conn_id = Int32.to_int conn_id in
+      let x = Hashtbl.find connections conn_id in
+      (* TODO check if seq_num < x.seq_num and reject *)
+      Hashtbl.replace connections conn_id {x with seq_num = Int64.add seq_num Int64.(of_int count)} ;
+      Lwt_io.write x.oc msg
+      >> loop 2 ""
   | `Invalid _ ->
     Lwt_io.eprintf "got an INVALID packet, TODO kill connection\n"
   end
-  >> loop 2 ""
   in loop 2 ""
   >> Lwt_io.eprintf "shutting down loop\n"
 
