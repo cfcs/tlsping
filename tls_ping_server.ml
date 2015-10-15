@@ -5,26 +5,82 @@ type connection =
   { interval  : int
   ; oc        : Lwt_io.output_channel
   ; ic        : Lwt_io.input_channel
+  ; last_output_time : float
   ; address   : string
   ; port      : int
+  ; owner_fp  : string
   ; seq_num   : int64
   ; incoming  : string Queue.t
+  ; incoming_condition : int Lwt_condition.t (* TODO use mutex? http://ocsigen.org/lwt/2.5.0/api/Lwt_condition*)
   ; outgoing  : (int64 * string) Queue.t
   }
 
 let connections = Hashtbl.create 10
 
-let handle_incoming ic oc incoming () =
+let owner_fp_of_state tls_state =
+  X509.fingerprint List.(hd Tls.Core.((
+    begin match Tls.Engine.epoch tls_state with
+    | `Epoch x -> x
+    | `InitialEpoch -> failwith "TODO initialepoch"
+    end).peer_certificate))
+  `SHA256
+  |> Cstruct.to_string
+
+let handle_incoming ic incoming incoming_condition () =
   let rec loop () =
-    Lwt_io.read ~count:512 ic >>= fun input ->
+    Lwt_io.read ~count:65537 ic >>= fun input ->
     if "" = input then raise End_of_file else
     Lwt_io.printf "handle_incoming: %d bytes read\n" String.(length input) >>= fun () ->
-    Queue.add input incoming ;
-    Lwt_io.write oc (serialize_incoming input) (* TODO automatically subscribe?*)
-    >> loop ()
+    Queue.add (serialize_incoming input) incoming ;
+    Lwt_condition.broadcast incoming_condition 1 ;
+    loop ()
   in loop ()
 
-let cmd_connect client_oc (`Connect (interval , address , port)) =
+let handle_subscribe condition_input_available queue oc () =
+  (*TODO this scales rather badly when the queue is large,
+   *     and is essentially a dirty hack. TODO rewrite *)
+  (* TODO: should verify owner_fp *)
+  let rec loop () =
+    Lwt_condition.wait condition_input_available >>= fun amount ->
+    Lwt_io.eprintf "handle_subscribe %d msgs\n" amount >>= fun () ->
+    let skip = ref @@ (Queue.(length queue) - amount) in
+    let msgs = List.rev @@ Queue.fold (
+      fun acc -> fun msg ->
+        begin match !skip with
+        | 0 -> msg :: acc
+        | _ -> skip := !skip -1 ; acc
+        end
+      ) [] queue
+    in
+      Lwt_list.iter_s (*TODO what does _s mean?*) (fun msg -> Lwt_io.write oc msg) msgs
+    >>=fun()-> loop ()
+  in loop ()
+
+let handle_interval conn_id () =
+  let rec send_pong () =
+    let x = Hashtbl.find connections conn_id in
+    let now = Unix.time () in
+    begin match x.last_output_time +. (float_of_int x.interval) > now with
+    | true ->
+      return ()
+    | false ->
+      let rec get_pong () =
+        begin match Queue.pop x.outgoing with
+        | (discard , _) when discard < x.seq_num -> get_pong ()
+        | (s , msg) -> s , msg (* TODO consider guard on s = x.seq_num ? *)
+        | exception Queue.Empty -> x.seq_num , "" (* give up TODO kill connection *)
+        end
+      in
+      let seq_num , msg = get_pong () in
+      Lwt_io.eprintf "SENDING PONG %Ld -> %Ld\n" x.seq_num seq_num >>= fun () ->
+      Hashtbl.replace connections conn_id {x with seq_num ; last_output_time = now } ;
+      Lwt_io.write x.oc msg
+    end
+    >> Lwt_unix.sleep 1.0 >> send_pong ()
+  in
+  send_pong ()
+
+let cmd_connect tls_state client_oc (`Connect (interval , address , port)) =
   Tlsping.create_socket address >>= function
   | Error () ->
       Lwt_io.eprintf "cmd_connect: create_socket: fail\n"
@@ -41,12 +97,16 @@ let cmd_connect client_oc (`Connect (interval , address , port)) =
   let id = 1 +  Hashtbl.length connections in (*TODO proper counter *)
   let us = { (* TODO tie this to the TLS client cert *)
       interval
+        (* TODO interval http://ocsigen.org/lwt/2.5.0/api/Lwt_timeout *)
     ; oc = Lwt_io.of_fd Output remote_fd
     ; ic = Lwt_io.of_fd Input  remote_fd
+    ; last_output_time = Unix.time ()
     ; address
     ; port
+    ; owner_fp = owner_fp_of_state tls_state
     ; seq_num  = 0L
     ; incoming = Queue.create ()
+    ; incoming_condition = Lwt_condition.create ()
     ; outgoing = Queue.create ()
     } 
   in
@@ -54,15 +114,17 @@ let cmd_connect client_oc (`Connect (interval , address , port)) =
   (* Start a separate thread to save incoming data: *)
   Lwt_io.write client_oc (serialize_connect_answer Int32.(of_int id) address port)
   >>= fun () ->
-  Lwt.async (handle_incoming us.ic client_oc us.incoming) ;
+  Lwt.async (handle_subscribe us.incoming_condition us.incoming client_oc ) ;
+  Lwt.async (handle_incoming us.ic us.incoming us.incoming_condition) ;
+  Lwt.async (handle_interval id) ;
   return ()
 
-let handle_server (ic, (oc : Lwt_io.output_channel)) addr () =
+let handle_server (tls_state , (ic, (oc : Lwt_io.output_channel))) () =
   (** main function for handling a connection from an authenticated client **)
   (* TODO tie all state to the client certificate to allow multiple users *)
-  let _ = addr , oc in (* TODO *)
   let hex s = begin match Hex.of_string s with `Hex s -> s end in
   Lwt_io.eprintf "got an authenticated connection from a client!\n" >>
+
   let rec loop needed_len acc =
   Lwt_io.printf "entering loop, reading %d B\n" needed_len >>
   Lwt_io.read ~count:needed_len ic >>= fun msg ->
@@ -73,29 +135,47 @@ let handle_server (ic, (oc : Lwt_io.output_channel)) addr () =
   let msg = String.concat "" [acc ; msg] in
   begin match unserialized_of_client_msg msg with
   | `Need_more needed_len ->
-    Lwt_io.printf "client->server: read incomplete packet, need bytes: %d\n" needed_len
-    >> loop needed_len msg
+      Lwt_io.printf "client->server: read incomplete packet, need bytes: %d\n" needed_len
+      >> loop needed_len msg
   | `Subscribe conn_id ->
-      let _ = conn_id in
-      (* TODO Lwt.async (handle_subscribe conn_id) ; *)
-      loop 2 ""
+      let x = Hashtbl.find connections Int32.(to_int conn_id) in
+      if owner_fp_of_state tls_state = x.owner_fp then
+      (Lwt.async (handle_subscribe x.incoming_condition x.incoming oc) ;
+      loop 2 "")
+      else Lwt_io.eprintf "SUBSCRIBE: CAN'T SUBSCRIBE TO OTHER PERSON'S CONNECTION\n"
   | `Connect (ping_interval, address, port) as params ->
-    Lwt_io.printf "CONNECT request for ping interval %d, host '%s':%d\n"
-                  ping_interval address port
-    >> cmd_connect oc params
-    >> loop 2 ""
+      Lwt_io.printf "CONNECT request for ping interval %d, host '%s':%d\n"
+                    ping_interval address port
+      >> cmd_connect tls_state oc params
+      >> loop 2 ""
   | `Outgoing (conn_id , seq_num , count , msg) ->
       Lwt_io.printf "OUTGOING for conn %ld seq %Ld count %d msg: %s\n"
         conn_id seq_num count (begin match Hex.of_string msg with `Hex s->s end)
         >>= fun () ->
       let conn_id = Int32.to_int conn_id in
       let x = Hashtbl.find connections conn_id in
-      (* TODO check if seq_num < x.seq_num and reject *)
-      Hashtbl.replace connections conn_id {x with seq_num = Int64.add seq_num Int64.(of_int count)} ;
-      Lwt_io.write x.oc msg
-      >> loop 2 ""
+      if x.seq_num > seq_num then
+        (* make sure we do not break the connection by transmitting the same sequence number twice *)
+        Lwt_io.eprintf "OUTGOING - too HIGH sequence number: %Ld > %Ld\n" x.seq_num seq_num
+        >> loop 2 ""
+      else
+        (Hashtbl.replace connections conn_id {x with seq_num = Int64.add seq_num Int64.(of_int count)} ;
+        Lwt_io.write x.oc msg
+        >> loop 2 "")
+  | `Queue (conn_id , seq_num, msgs) ->
+      Lwt_io.eprintf "QUEUE: conn_id: %ld seq_num: %Ld msg count: %d\n"
+        conn_id seq_num List.(length msgs)
+      >>
+      let conn_id = Int32.to_int conn_id in
+      let x = Hashtbl.find connections conn_id in
+      let rec add_q n = function
+      | msg :: tl ->
+          Queue.add (n, msg) x.outgoing ;
+          add_q Int64.(add n 1L) tl
+      | [] -> loop 2 ""
+      in add_q seq_num msgs
   | `Invalid _ ->
-    Lwt_io.eprintf "got an INVALID packet, TODO kill connection\n"
+      Lwt_io.eprintf "got an INVALID packet, TODO kill connection\n"
   end
   in loop 2 ""
   >> Lwt_io.eprintf "shutting down loop\n"
@@ -115,15 +195,22 @@ let server_service listen_host listen_port (ca_public_cert : string) proxy_publi
   let rec loop s =
     match_lwt
       try_lwt
-        Tls_lwt.accept_ext config s >|= fun r -> `R r
+        (* Tls_lwt.Unix provides no way to liberate the fd from the `t`, so we need to copy-paste some code: *)
+        (* match Tls.State.state.encryptor with Some crypto_context -> crypto_context.sequence*)
+        (*Lwt_unix.accept s >>= fun (fd, addr) ->*)
+        Tls_lwt.Unix.accept config s >|= fun (unix_t, _) ->
+        begin match unix_t.state with
+        | `Active t -> `R (t, Tls_lwt.of_t unix_t)
+        | `Eof | `Error _ -> `L "Tls_lwt.Unix.accept error / eof"
+        end
       with
         | Unix.Unix_error (e, f, p) -> return (`L ("unix: " ^ Unix.(error_message e) ^ f ^ p))
         | Tls_lwt.Tls_alert a -> return (`L (Tls.Packet.alert_type_to_string a))
         | Tls_lwt.Tls_failure f -> return (`L (Tls.Engine.string_of_failure f))
         | _ (*exn*) -> return (`L "loop: exception")
     with
-    | `R (channels, addr) ->
-      let () = async (handle_server channels addr) in
+    | `R (channels) ->
+      let () = async (handle_server channels) in
       loop s
     | `L (msg) ->
       Lwt_io.eprintf "server fucked up: %s\n" msg

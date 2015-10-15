@@ -67,6 +67,22 @@ let serialize_outgoing conn_id seq_num msg =
   ; msg     : -1 : string
   } |> c_prepend_length_and_opcode Outgoing
 
+let serialize_queue ~conn_id seq_num msgs =
+  let rec s_msg acc = function
+  | msg :: tl ->
+      s_msg
+      ((BITSTRING
+        { String.length msg : 16 : int, unsigned, bigendian
+        ; msg : -1 : string } |> string_of_bitstring)
+      :: acc) tl
+  | [] -> String.concat "" acc
+  in
+  BITSTRING
+  { conn_id       : 32 : int, unsigned, bigendian
+  ; seq_num       : 64 : int, unsigned, bigendian
+  ; s_msg [] msgs : -1 : string
+  } |> c_prepend_length_and_opcode Queue
+
 let serialize_subscribe conn_id =
   BITSTRING
   { conn_id : 32 : int, unsigned, bigendian
@@ -155,6 +171,25 @@ let unserialized_of_client_msg msg =
     ; count   : 16 : int, unsigned, bigendian (* amount of TLS records in msg *)
     ; msg     : -1 : string
     } -> `Outgoing (conn_id , seq_num , count , msg)
+
+  | { opcode  :  8 : string,
+        check(opcode = opcode_of_client_operation Queue)
+    ; conn_id : 32 : int, unsigned, bigendian, check(conn_id <> 0l)
+    ; seq_num : 64 : int, unsigned, bigendian
+    ; msgs    : -1 : bitstring
+    } ->
+      let rec unpack_msgs acc msgs = (
+        bitmatch msgs with
+        | { len :  16 : int, unsigned, bigendian, check(len <> 0), bind(len*8)
+          ; msg : len : string
+          ; tl  :  -1 : bitstring
+          } -> unpack_msgs (msg :: acc) tl
+        | { _ } as x when 0 = bitstring_length x ->
+            `Queue (conn_id , seq_num , List.(rev acc)) (*TODO tag each?*)
+        | { _ } ->
+            `Invalid `Invalid_packet
+      )in
+      unpack_msgs [] msgs
 
   | { opcode  :  8 : string,
         check(opcode = opcode_of_client_operation Subscribe)

@@ -1,5 +1,4 @@
 open Tlsping
-open Tls
 open Rresult
 open Lwt
 (*TODO
@@ -7,29 +6,25 @@ let states = Hashtbl.create 10
 *)
 type generate_msg_error =
 | TLS_handshake_not_finished
-| TLS_not_acceptable_ciphersuite
 
-let generate_msg tls_state payload (seq_num : int64)
-  : (Cstruct.t, generate_msg_error) R.t =
-  (* encrypt a record containing [payload] and MAC'd with the given [seq_num],
-   * using the client keys from [tls_state] *)
-  match Engine.epoch tls_state with
-  | `InitialEpoch -> Error TLS_handshake_not_finished
-  | `Epoch epoch ->
-  let open Tls.Core in
-  begin match epoch.protocol_version , epoch.ciphersuite with
-  | TLS_1_2 ,
-    ( `TLS_DHE_RSA_WITH_AES_256_CBC_SHA
-    | `TLS_DHE_RSA_WITH_AES_256_CBC_SHA256) ->
-    let session = Handshake_common.session_of_epoch epoch in
-    let c_context = fst (Handshake_crypto.initialise_crypto_ctx
-                      epoch.protocol_version session) in
-    let c_context = Tls.State.{ c_context with sequence = seq_num } in
-      Engine.encrypt TLS_1_2 (Some c_context) Packet.APPLICATION_DATA payload
-      |> snd |> R.ok
-  | _ ->
-    Error TLS_not_acceptable_ciphersuite
-  end
+let generate_queue tls_state payloads seq_num_offset =
+  let rec generate_msg (seq_num : int64) payloads acc =
+    (* encrypt a record containing [payload] and MAC'd with the given [seq_num],
+     * using the client keys from [tls_state] *)
+    begin match payloads , tls_state.Tls.State.encryptor with
+    | (payload :: payloads) , Some { sequence ; cipher_st } ->
+        let new_state = {tls_state with encryptor = Some {sequence ; cipher_st}} in
+        begin match Tls.Engine.send_application_data new_state [Cstruct.(of_string payload)] with
+        | Some encrypted ->
+          generate_msg Int64.(add 1L seq_num) payloads ((seq_num , snd @@ encrypted) :: acc)
+        | None -> failwith "TODO2"
+        end
+    | [] , _ -> List.rev acc
+    | _  , _ -> failwith "TODO"
+    end
+  in
+  generate_msg seq_num_offset payloads []
+
 
 type tls_state_ref_t = {mutable tls_state : Tls.Engine.state option }
 let tls_state_ref : tls_state_ref_t = { tls_state = None }
@@ -37,21 +32,21 @@ let tls_state_ref : tls_state_ref_t = { tls_state = None }
 let connect_proxy client_out (host , port) certs =
   Tlsping.(tls_config certs) >>= function { authenticator ; ciphers ; version ; hashes ; certificates } ->
   let config =Tls.Config.client ~authenticator ~ciphers ~version ~hashes ~certificates () in
-  Lwt_io.printf "connecting to proxy\n" >>
+  Lwt_io.printf "connecting to proxy\n" >>=fun() ->
   try_lwt
     create_socket host >>= function
     | Error () -> return @@ R.error "unable to resolve proxy hostname"
     | Ok (fd, proxy) ->
     (* the ServerName on the cert might not match the actual hostname we use,
      * so we need to provide it in ~host: below *)
-        Lwt_unix.connect fd (ADDR_INET (proxy, port)) >>
+        Lwt_unix.connect fd (ADDR_INET (proxy, port)) >>=fun()->
         Tls_lwt.Unix.client_of_fd config ~host:"proxy.example.org" fd (* TODO "proxy.example.org" should obviously be a parameter, testing only! *)
         >>= fun tls_t ->
-        Lwt_io.write client_out @@ Socks.socks_response true >>
+        Lwt_io.write client_out @@ Socks.socks_response true >>=fun()->
         return @@ R.ok Tls_lwt.(of_t tls_t)
   with
   | Unix.Unix_error (Unix.ECONNREFUSED, f_n , _) ->
-      Lwt_io.write client_out @@ Socks.socks_response false >>
+      Lwt_io.write client_out @@ Socks.socks_response false >>=fun()->
       return @@ R.error @@ "Unix error: connection refused: " ^ f_n
   | Tls_lwt.Tls_failure err ->
       return @@ R.error @@ "Tls_failure: " ^
@@ -61,7 +56,7 @@ let connect_proxy client_out (host , port) certs =
       | _ -> Tls.Engine.string_of_failure err
       end
 
-let handle_outgoing client_in proxy_out () =
+let handle_outgoing conn_id client_in proxy_out () =
   let rec loop () =
     (* TODO handle disconnect / broken line: *)
     Lwt_io.read_line client_in >>= fun line ->
@@ -78,7 +73,17 @@ let handle_outgoing client_in proxy_out () =
       | Some (tls_state , cstruct_out) ->
           (* TODO sync to global state: *)
           tls_state_ref.tls_state <- Some tls_state ;
-          Lwt_io.write proxy_out (serialize_outgoing 1l 0L Cstruct.(to_string cstruct_out))
+          begin match tls_state.encryptor with
+          | Some crypto_context ->
+             let new_sequence = Int64.(add 1L crypto_context.sequence) in
+             let queue_list = generate_queue tls_state ["PRIVMSG joe :help\r\n"] new_sequence in
+             Lwt_io.write proxy_out (serialize_outgoing conn_id crypto_context.sequence Cstruct.(to_string cstruct_out))
+             >>= fun () ->
+             Lwt_list.iter_s (fun (seq_num, cout) -> Lwt_io.write proxy_out (serialize_queue conn_id seq_num [Cstruct.to_string cout])) queue_list >>= fun () ->
+             Lwt_io.printf "Queueing!\n"
+          | None ->
+              Lwt_io.eprintf "QUEUE FAIL: no encryptor context\n"
+          end
       end
     | false ->
       (* TODO queue outgoing, don't drop*)
@@ -94,15 +99,17 @@ let handle_irc_client client_in client_out target proxy_details certs =
   | Error err ->
     Lwt_io.eprintf "err: %s\n" err
   | Ok (proxy_in, proxy_out) ->
-  Lwt_io.eprintf "connected to proxy\n" >>
-  begin match serialize_connect 60 (target.Socks.address, target.port) with
+  Lwt_io.eprintf "connected to proxy\n" >>= fun() ->
+  begin match serialize_connect 45 (target.Socks.address, target.port) with
   | None -> Lwt_io.eprintf "error: unable to serialize connect"
   | Some connect_msg ->
   (* Ask the proxy to connect to target.address: *)
   Lwt_io.write proxy_out connect_msg >>= fun () ->
 
+  (* TODO first of all we should ask for current status *)
+
   let rec loop count acc =
-    Lwt_io.printf "loop reading connect status need %d bytes\n" count >>
+    Lwt_io.printf "loop reading connect status need %d bytes\n" count >>=fun() ->
     Lwt_io.read ~count proxy_in >>= fun msg ->
     if "" = msg then failwith "invalid bytes todo\n" else
     let msg = String.concat "" [acc ; msg] in
@@ -137,7 +144,7 @@ let handle_irc_client client_in client_out target proxy_details certs =
   >>= fun () ->
 
   (* setup thread that encrypts outgoing messages by proxy *)
-  Lwt.async (handle_outgoing client_in proxy_out) ;
+  Lwt.async (handle_outgoing conn_id client_in proxy_out) ;
 
   (* successfully connected; handle answers *)
   let rec loop needed_len acc =
@@ -163,10 +170,11 @@ let handle_irc_client client_in client_out target proxy_details certs =
          tls_state_ref.tls_state <- Some tls_state ;
          begin match resp with
          | Some resp_data ->
-             Lwt_io.write proxy_out (serialize_outgoing conn_id 0L Cstruct.(to_string resp_data))
+             let sequence = begin match tls_state.encryptor with Some crypto_context -> crypto_context.sequence |None->failwith "TODO" end in
+             Lwt_io.write proxy_out (serialize_outgoing conn_id sequence Cstruct.(to_string resp_data))
          | None -> return ()
          end
-         >>
+         >>= fun() ->
          begin match msg with
          | Some msg_data -> Lwt_io.write client_out Cstruct.(to_string msg_data)
          | None -> return ()
@@ -195,7 +203,7 @@ let handle_client (unix_fd, sockaddr) proxy certs () =
   | Lwt_unix.ADDR_INET ( _ (*inet_addr*), port) ->
     Lwt_io.printf "Incoming connection, src port: %d\n" port
   | Lwt_unix.ADDR_UNIX _ -> return ()
-  end >>
+  end >>= fun () ->
   let client_in  = Lwt_io.of_fd Input  unix_fd
   and client_out = Lwt_io.of_fd Output unix_fd in
   match_lwt Socks.parse_socks4 client_in with
@@ -204,7 +212,7 @@ let handle_client (unix_fd, sockaddr) proxy certs () =
   | `Invalid_request ->
       Lwt_io.eprintf "invalid request!\n" (*TODO failwith / logging *)
   | `Socks4 ({port ; fingerprint; address } as target) ->
-      Lwt_io.eprintf "got request for host '%s' port %d fp %s\n" address port fingerprint >>
+      Lwt_io.eprintf "got request for host '%s' port %d fp %s\n" address port fingerprint >>=fun() ->
       handle_irc_client client_in client_out target proxy certs
 
 let listener_service (host,port) proxy certs =
