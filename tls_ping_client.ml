@@ -221,7 +221,7 @@ let handle_irc_client client_in client_out target proxy_details certs =
          | None ->
            conn_state.tls_state <- tls_state
          end ;
-         conn_state.max_covered_sequence <- int64_max queued_seq conn_state.max_covered_sequence;
+         conn_state.max_covered_sequence <- int64_max queued_seq conn_state.max_covered_sequence ;
          begin match resp with
          | Some resp_data ->
              let sequence = begin match tls_state.encryptor with Some crypto_context -> crypto_context.sequence |None->failwith "TODO" end in
@@ -241,9 +241,9 @@ let handle_irc_client client_in client_out target proxy_details certs =
              *)
              Lwt_io.eprintf "Incoming: remote next_seq: %Ld queued_seq: %Ld\n"
                next_seq queued_seq
-             >>
+             >>= fun() ->
              Lwt_io.write client_out Cstruct.(to_string msg_data)
-             >> send_pings_if_needed conn_id proxy_out
+             >>=fun()-> send_pings_if_needed conn_id proxy_out
          | None -> return ()
          end
          >> loop 2 ""

@@ -218,7 +218,9 @@ let handle_server (tls_state , (ic, (oc : Lwt_io.output_channel))) () =
       Lwt_io.eprintf "got an INVALID packet, TODO kill connection\n"
   end
   in loop 2 ""
-  >> Lwt_io.eprintf "shutting down loop\n" (* TODO kill connections and clean up queues as relevant*)
+  >>=fun() ->
+    (* TODO Hashtbl.remove connections conn_id ; *)
+    Lwt_io.eprintf "shutting down loop\n" (* TODO kill connections and clean up queues as relevant*)
 
 let server_service listen_host listen_port (ca_public_cert : string) proxy_public_cert proxy_secret_key : 'a Lwt.t =
   let open Lwt_unix in
