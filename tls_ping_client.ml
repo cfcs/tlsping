@@ -1,37 +1,47 @@
 open Tlsping
 open Rresult
 open Lwt
-(*TODO
-let states = Hashtbl.create 10
-*)
-type generate_msg_error =
-| TLS_handshake_not_finished
 
-let generate_queue tls_state payloads seq_num_offset =
-  let rec generate_msg (seq_num : int64) payloads acc =
+type encrypt_msg_error =
+| TLS_handshake_not_finished
+| TLS_state_error
+
+let encrypt_queue tls_state payloads seq_num_offset =
+  let rec encrypt_msg tls_state payloads acc =
     (* encrypt a record containing [payload] and MAC'd with the given [seq_num],
      * using the client keys from [tls_state] *)
     begin match payloads , tls_state.Tls.State.encryptor with
-    | (payload :: payloads) , Some { sequence ; cipher_st } ->
-        let new_state = {tls_state with encryptor = Some {sequence ; cipher_st}} in
-        begin match Tls.Engine.send_application_data new_state [Cstruct.(of_string payload)] with
-        | Some encrypted ->
-          generate_msg Int64.(add 1L seq_num) payloads ((seq_num , snd @@ encrypted) :: acc)
-        | None -> failwith "TODO2"
+    | (payload :: payloads) , Some encryptor ->
+        begin match Tls.Engine.send_application_data tls_state [Cstruct.(of_string payload)] with
+        | None -> R.error TLS_state_error
+        | Some (tls_state , encrypted) ->
+            encrypt_msg tls_state payloads ((encryptor.sequence , encrypted) :: acc)
         end
-    | [] , _ -> List.rev acc
-    | _  , _ -> failwith "TODO"
+    | [] , Some _ -> R.ok (tls_state , List.rev acc)
+    | _  , None   -> R.error TLS_state_error
     end
   in
-  generate_msg seq_num_offset payloads []
+  match tls_state.Tls.State.encryptor with
+  | Some { sequence ; _ } when (sequence > seq_num_offset) ->
+    (* the `when` guard makes sure we only encrypt data "ahead" of time *)
+    R.error TLS_state_error (* TODO error type for this *)
+  | Some { cipher_st ; _ } ->
+      let new_state = {tls_state with encryptor = Some {cipher_st ; sequence = seq_num_offset }} in
+      encrypt_msg new_state payloads []
+  | None ->
+      R.error TLS_state_error
 
-
-type tls_state_ref_t = {mutable tls_state : Tls.Engine.state option }
-let tls_state_ref : tls_state_ref_t = { tls_state = None }
+type connection_state =
+  { mutable tls_state : Tls.Engine.state
+  ; outgoing          : (int64 * string) Queue.t
+  ; address           : string
+  ; port              : int
+  }
+let states = Hashtbl.create 5
 
 let connect_proxy client_out (host , port) certs =
   Tlsping.(tls_config certs) >>= function { authenticator ; ciphers ; version ; hashes ; certificates } ->
-  let config =Tls.Config.client ~authenticator ~ciphers ~version ~hashes ~certificates () in
+  let config = Tls.Config.client ~authenticator ~ciphers ~version ~hashes ~certificates () in
   Lwt_io.printf "connecting to proxy\n" >>=fun() ->
   try_lwt
     create_socket host >>= function
@@ -58,36 +68,27 @@ let connect_proxy client_out (host , port) certs =
 
 let handle_outgoing conn_id client_in proxy_out () =
   let rec loop () =
+    let print_seq s = begin match s.Tls.State.encryptor with Some {sequence; _} -> Lwt_io.eprintf "seq: %Ld\n" sequence | None -> Lwt_io.eprintf "NO SEQ\n" end in
     (* TODO handle disconnect / broken line: *)
     Lwt_io.read_line client_in >>= fun line ->
     (* when using Lwt_io.read instead:
        if "" = line then raise End_of_file ; *)
-    let tls_state = begin match tls_state_ref.tls_state with Some t -> t | None -> failwith "fail" end in
-    begin match Tls.Engine.can_handle_appdata tls_state with
-    | true ->
-      let line = line ^ "\n" in
-      begin match Tls.Engine.send_application_data tls_state [Cstruct.(of_string line)] with
-      | None ->
-          (* TODO: POOF - session dead*)
-          Lwt_io.eprintf "TODO error handling; TLS fucked up\n"
-      | Some (tls_state , cstruct_out) ->
-          (* TODO sync to global state: *)
-          tls_state_ref.tls_state <- Some tls_state ;
-          begin match tls_state.encryptor with
-          | Some crypto_context ->
-             let new_sequence = Int64.(add 1L crypto_context.sequence) in
-             let queue_list = generate_queue tls_state ["PRIVMSG joe :help\r\n"] new_sequence in
-             Lwt_io.write proxy_out (serialize_outgoing conn_id crypto_context.sequence Cstruct.(to_string cstruct_out))
-             >>= fun () ->
-             Lwt_list.iter_s (fun (seq_num, cout) -> Lwt_io.write proxy_out (serialize_queue conn_id seq_num [Cstruct.to_string cout])) queue_list >>= fun () ->
-             Lwt_io.printf "Queueing!\n"
-          | None ->
-              Lwt_io.eprintf "QUEUE FAIL: no encryptor context\n"
-          end
-      end
-    | false ->
-      (* TODO queue outgoing, don't drop*)
-      Lwt_io.eprintf "TODO! dropping line because no conn: '%s'\n" line
+    let conn_state = Hashtbl.find states conn_id in (*TODO handle not found*)
+    begin match conn_state.tls_state.encryptor with
+    | None ->
+        Lwt_io.eprintf "TODO error no encryptor state\n"
+    | Some {sequence = target_sequence; _ } ->
+        begin match encrypt_queue conn_state.tls_state [line ^ "\r\n"] target_sequence with
+        | Ok ( tls_state , [sequence , cout] ) ->
+            print_seq conn_state.tls_state >>= fun()->
+            print_seq tls_state >>= fun()->
+            conn_state.tls_state <- tls_state ;
+            Queue.add (sequence , line) conn_state.outgoing ;
+            Lwt_io.write proxy_out (serialize_outgoing conn_id sequence Cstruct.(to_string cout))
+        | Ok ( _ , [] )
+        | Ok _ (* TODO *)
+        | Error _ -> Lwt_io.eprintf "Unable to encrypt and send outgoing message\n"
+        end
     end
     >> loop ()
   in
@@ -139,9 +140,8 @@ let handle_irc_client client_in client_out target proxy_details certs =
   return @@ Tls.Engine.client tls_config
   >>= fun (tls_state, client_hello) ->
   (* Initiate a TLS connection: *)
-  tls_state_ref.tls_state <- Some tls_state ;
-  Lwt_io.write proxy_out (serialize_outgoing conn_id 0L Cstruct.(to_string client_hello))
-  >>= fun () ->
+  Hashtbl.add states conn_id {tls_state; outgoing = Queue.create () ; address = target.address ; port = target.port } ;
+  Lwt_io.write proxy_out (serialize_outgoing conn_id 0L Cstruct.(to_string client_hello)) >>= fun () ->
 
   (* setup thread that encrypts outgoing messages by proxy *)
   Lwt.async (handle_outgoing conn_id client_in proxy_out) ;
@@ -164,10 +164,10 @@ let handle_irc_client client_in client_out target proxy_details certs =
 
     | `Incoming msg ->
       (* TODO decrypt ; handle write errors; buffer if client disconnected? *)
-      let tls_state = begin match tls_state_ref.tls_state with Some t -> t | None -> failwith "fail" end in
-      begin match Tls.Engine.handle_tls tls_state Cstruct.(of_string msg) with
+      let conn_state = Hashtbl.find states conn_id in (*TODO handle not found?*)
+      begin match Tls.Engine.handle_tls conn_state.tls_state Cstruct.(of_string msg) with
       | `Ok (`Ok tls_state , `Response resp, `Data msg) ->
-         tls_state_ref.tls_state <- Some tls_state ;
+         conn_state.tls_state <- tls_state ;
          begin match resp with
          | Some resp_data ->
              let sequence = begin match tls_state.encryptor with Some crypto_context -> crypto_context.sequence |None->failwith "TODO" end in
@@ -181,10 +181,10 @@ let handle_irc_client client_in client_out target proxy_details certs =
          end
          >> loop 2 ""
       | `Ok (_ , `Response resp , `Data msg) ->
-          let _ = resp , msg in
+          let _ = resp , msg in (*TODO*)
           Lwt_io.eprintf "TLS EOF or ALERT\n"
       | `Fail (failure , `Response resp) ->
-          let _ = failure, resp in
+          let _ = resp in (*TODO*)
           Lwt_io.eprintf "TLS FAIL: %s\n" @@ Tls.Engine.string_of_failure failure
       end
 

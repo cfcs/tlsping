@@ -1,4 +1,4 @@
-# tls-pingd
+# tls-ping
 
 _A daemon that sends PINGs over TLS._
 
@@ -9,9 +9,9 @@ _A daemon that sends PINGs over TLS._
 - supported cipher suites: `tls-pingd` is implemented for the following CipherSuites, see [TLS v1.2: CipherSuites](https://tools.ietf.org/html/rfc3268) for details
   - `TLS_DHE_RSA_AES_256_CBC_SHA`
   - `TLS_DHE_RSA_AES_256_CBC_SHA256`
-- `proxy `: `tls-pingd`
+- `proxy `: `tls-ping-server` running on a potentially untrusted machine (ie. VPS)
 - `server`: IRC/Jabber/whatever TLS server
-- `client`: `tls-ping-client`
+- `client`: `tls-ping-client` running on the local machine (ie. laptop)
 - `control channel`: encrypted connection between `client` and `proxy`
 - `connection id`: the numeric ID of an open connection
 - `ping interval`: the interval for how often the `client` should dispatch ping messages, in seconds
@@ -21,7 +21,7 @@ _A daemon that sends PINGs over TLS._
 
 The user wants to stay connected to a service which requires activity within deterministic intervals.
 
-`tls-pingd` accomplishes this by running a `proxy` on an always-available untrusted machine, tunneling the end-to-end-encrypted TLS connection from the `client` to the `server`.
+`tls-ping` accomplishes this by running a `proxy` on an always-available untrusted machine, tunneling the end-to-end-encrypted TLS connection from the `client` to the `server`.
 
 The `client` encrypts the deterministic PING messages ahead of time and sends them to the `proxy` over the `control channel` without revealing the encryption or MAC keys for the session.
 The PING messages contain the sequence number for the record to enable the `client` to determine which PING messages have been sent by the `proxy` by examining the `PONG` replies.
@@ -103,14 +103,14 @@ Since the `seq_num` is not sent in cleartext, we need to continually tag records
 
   - `CONNECT` `{PING interval}` `{port}` `{address}`
     - return:
-      - on success: `CONNECT_ANSWER {connection id} `{port}` `{address}`
-      - on failure: `CONNECT_ANSWER 0 `{port}` `{address}`
+      - on success: `CONNECT_ANSWER` `{connection id}` `{port}` `{address}`
+      - on failure: `CONNECT_ANSWER` `0` `{port}` `{address}`
     - action: Establish a TCP connection to the given address and port
 
   - `OUTGOING` `{connection id}` `{seq_num offset}` `seq_num count` `{encrypted TLS records}`
     - return: none
       - unless PINGs have already been with seq_num lower than `{seq_num offset} + {seq_num count}` in which case a `STATUS_ANSWER` for the `{connection id}` is returned
-    - action: drop queued PINGs with `{seq_num}` lower than `{seq_num offset} + `{seq_num count}`, if there are any
+    - action: drop queued PINGs with `{seq_num}` lower than `{seq_num offset}` + `{seq_num count}`, if there are any
 
   - `QUEUE` `{connection id}` `{seq_num offset}` `{count seq_num}` `{PING record [seq_num offset]}` `{PING record [seq_num ...]}` `{PING record [seq_num offset + count seq_num]}`
     - return: `STATUS_ANSWER` for the `{connection id}`
@@ -122,7 +122,7 @@ Since the `seq_num` is not sent in cleartext, we need to continually tag records
       - If the `{connection id}` has failed, a `{seq_num offset}` of `0` may be used to erase all `proxy` state related to `{connection id}`
 
   - `STATUS` `{first connection id}` `{last connection id}`
-    - return: `STATUS_ANSWER` `{count of status tuples to follow}` and `[[` {connection id}` `{PING interval}` `{port}` `{length of address}` `{address}` `{current seq_num}` `{count of queued PING records}` `]]` for each connected `{connection id}`. if a connection has failed, `seq_num = 0` is sent
+    - return: `STATUS_ANSWER` `{count of status tuples to follow}` and `[[` `{connection id}` `{PING interval}` `{port}` `{length of address}` `{address}` `{current seq_num}` `{count of queued PING records}` `]]` for each connected `{connection id}`. if a connection has failed, `seq_num = 0` is sent
     - action: none
 
   - `FETCH` `{connection id}` `{seq_num offset}` `{max seq_num}`
@@ -137,6 +137,8 @@ Since the `seq_num` is not sent in cleartext, we need to continually tag records
 
 This concept is not strictly tied to TLS or IRC and may, depending on the cipher suites employed, and the protocol, be used on other record-oriented encrypted transport protocols. TODO research.
 
+______
+
 # OCaml implementation: SOCKS4 proxy
 
 ### Description
@@ -146,10 +148,27 @@ The OCaml implementation of the `client` in this repository is implemented as a 
 The host, port, and sha256 fingerprint of the x509 (TLS) certificate of `server` are provided in the initial SOCKS request by the "actual client".
 
 The sha256 fingerprint is configured as the "user_id" to send to the SOCKS proxy. This enables users to configure the fingerprints from within their client applications directly.
+The user may also use this field to supply the file name of a PEM certificate of a CA trusted for the destination.
 
 The control channel between `client` and `proxy` is protected by TLS using both client and server certificates, and they share a common (self-signed) CA.
 
-The `proxy` only allows access to existing connections etablished in previous sessions using the same client certificate.
+The `proxy` only allows access to existing connections etablished in previous sessions using the same client certificate (multiple separate users can use the same `proxy`).
+
+### Current status of the implementation
+
+- Implemented operations:
+  - `CONNECT`
+  - `CONNECT_ANSWER`
+  - `SUBSCRIBE`
+  - `INCOMING`
+- Partially implemented operations:
+  - `OUTGOING`: Records are sent, but no `STATUS_ANSWER` response in case of `seq_num` mismatch, and no PING queue freeing
+  - `QUEUE`: Records are queued and sent, but no `STATUS_ANSWER` given
+- Operations not implemented:
+  - `ACK`
+  - `STATUS`
+  - `STATUS_ANSWER`
+  - `FETCH`
 
 ### Installation
 
@@ -183,4 +202,17 @@ At the end of the excercise the parties must have:
 Client: `ca.public.certificate`, `client.secret.key`, `client.public.certificate`
 
 Proxy: `ca.public.certificate`, `proxy.secret.key`, `proxy.public.certificate`
+
+### Example usage
+
+Proxy machine:
+```
+./tls_ping_server ./ca.public.certificate ./proxy.public.certificate ./proxy.secret.key
+```
+
+Client machine:
+```
+./tls_ping_client 127.0.0.1 ./ca.public.certificate ./client.public.certificate ./client.secret.key &
+socat stdio socks4a:localhost:irc.example.org:6697,socksport=6697,socksuser=7e51d701e027bafa617c504dae989dd92a42273c3d8b6137a69b0d4741c9618f
+```
 

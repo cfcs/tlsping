@@ -10,7 +10,7 @@ type connection =
   ; port      : int
   ; owner_fp  : string
   ; seq_num   : int64
-  ; incoming  : string Queue.t
+  ; incoming  : string Queue.t (*TODO should be an Array*)
   ; incoming_condition : int Lwt_condition.t (* TODO use mutex? http://ocsigen.org/lwt/2.5.0/api/Lwt_condition*)
   ; outgoing  : (int64 * string) Queue.t
   }
@@ -34,7 +34,10 @@ let handle_incoming ic incoming incoming_condition () =
     Queue.add (serialize_incoming input) incoming ;
     Lwt_condition.broadcast incoming_condition 1 ;
     loop ()
-  in loop ()
+  in
+  try_lwt loop () with
+  | End_of_file -> Lwt_io.eprintf "handle_incoming: End_of_file TODO\n"
+  | Unix.Unix_error(Unix.ECONNRESET, "read", "") -> Lwt_io.eprintf "handle_incoming: broken read TODO\n"
 
 let handle_subscribe condition_input_available queue oc () =
   (*TODO this scales rather badly when the queue is large,
@@ -58,7 +61,10 @@ let handle_subscribe condition_input_available queue oc () =
 
 let handle_interval conn_id () =
   let rec send_pong () =
-    let x = Hashtbl.find connections conn_id in
+    begin match Hashtbl.find connections conn_id with
+    | exception Not_found -> (*TODO die*)
+        Lwt_io.eprintf "handle_interval: shutting down loop\n"
+    | x ->
     let now = Unix.time () in
     begin match x.last_output_time +. (float_of_int x.interval) > now with
     | true ->
@@ -71,12 +77,17 @@ let handle_interval conn_id () =
         | exception Queue.Empty -> x.seq_num , "" (* give up TODO kill connection *)
         end
       in
-      let seq_num , msg = get_pong () in
-      Lwt_io.eprintf "SENDING PONG %Ld -> %Ld\n" x.seq_num seq_num >>= fun () ->
-      Hashtbl.replace connections conn_id {x with seq_num ; last_output_time = now } ;
-      Lwt_io.write x.oc msg
+      begin match get_pong () with
+      | _ , "" | 0L , _ ->
+          Lwt_io.eprintf "UNABLE TO SEND PING FOR %s:%d, TODO kill connection\n" x.address x.port
+      | seq_num , msg ->
+          Lwt_io.eprintf "SENDING PING %Ld -> %Ld\n" x.seq_num seq_num >>= fun () ->
+          Hashtbl.replace connections conn_id {x with seq_num ; last_output_time = now } ;
+          Lwt_io.write x.oc msg
+      end
     end
     >> Lwt_unix.sleep 1.0 >> send_pong ()
+    end
   in
   send_pong ()
 
@@ -148,20 +159,27 @@ let handle_server (tls_state , (ic, (oc : Lwt_io.output_channel))) () =
                     ping_interval address port
       >> cmd_connect tls_state oc params
       >> loop 2 ""
-  | `Outgoing (conn_id , seq_num , count , msg) ->
+  | `Outgoing (conn_id , pkt_seq_num , count , msg) ->
       Lwt_io.printf "OUTGOING for conn %ld seq %Ld count %d msg: %s\n"
-        conn_id seq_num count (begin match Hex.of_string msg with `Hex s->s end)
+        conn_id pkt_seq_num count (begin match Hex.of_string msg with `Hex s->s end)
         >>= fun () ->
       let conn_id = Int32.to_int conn_id in
       let x = Hashtbl.find connections conn_id in
-      if x.seq_num > seq_num then
-        (* make sure we do not break the connection by transmitting the same sequence number twice *)
-        Lwt_io.eprintf "OUTGOING - too HIGH sequence number: %Ld > %Ld\n" x.seq_num seq_num
-        >> loop 2 ""
-      else
-        (Hashtbl.replace connections conn_id {x with seq_num = Int64.add seq_num Int64.(of_int count)} ;
-        Lwt_io.write x.oc msg
-        >> loop 2 "")
+      begin match pkt_seq_num , Int64.(sub pkt_seq_num x.seq_num) with
+      | 1L , -1L (* TODO work-around to handle initial handshake *)
+      | _ , 0L ->
+          Hashtbl.replace connections conn_id
+          {x with
+            (* Update next expected sequence number: *)
+            seq_num = Int64.add pkt_seq_num Int64.(of_int count)
+            (* Update PING interval timeout:  *)
+          ; last_output_time = Unix.time ()
+          } ;
+          Lwt_io.write x.oc msg
+          >> loop 2 ""
+      | _ , _ ->
+          Lwt_io.eprintf "OUTGOING - out of order transmitted seq_num: %Ld; previous: %Ld) -> %Ld\n" pkt_seq_num x.seq_num Int64.(sub pkt_seq_num x.seq_num)
+      end
   | `Queue (conn_id , seq_num, msgs) ->
       Lwt_io.eprintf "QUEUE: conn_id: %ld seq_num: %Ld msg count: %d\n"
         conn_id seq_num List.(length msgs)
@@ -178,7 +196,7 @@ let handle_server (tls_state , (ic, (oc : Lwt_io.output_channel))) () =
       Lwt_io.eprintf "got an INVALID packet, TODO kill connection\n"
   end
   in loop 2 ""
-  >> Lwt_io.eprintf "shutting down loop\n"
+  >> Lwt_io.eprintf "shutting down loop\n" (* TODO kill connections and clean up queues as relevant*)
 
 let server_service listen_host listen_port (ca_public_cert : string) proxy_public_cert proxy_secret_key : 'a Lwt.t =
   let open Lwt_unix in
