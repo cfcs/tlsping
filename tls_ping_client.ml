@@ -75,12 +75,12 @@ let send_pings_if_needed conn_id proxy_out =
   let new_offset =
     let rec lol proposed =
     begin match 1 = Int64.compare offset proposed with
-    | false -> begin match 1 = Int64.compare next_seq Int64.(sub proposed 5L) with
+    | false -> begin match 1 = Int64.compare next_seq Int64.(sub proposed 20000L) with
                | false -> proposed
-               | true -> lol Int64.(add proposed 5L)
+               | true -> lol Int64.(add proposed 20000L)
                end
-    | true  -> lol Int64.(add proposed 10L)
-    end in lol 10L
+    | true  -> lol Int64.(add proposed 20000L)
+    end in lol 43200L
   in
   let pings =
     let rec gen_pings acc = function
