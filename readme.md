@@ -34,6 +34,9 @@ If no `control channel` subscribing to a `connection id` is connected, the `prox
 
 Depending on the implementation it is likely possible to have several `clients` connected at the same time, subscribing to the same connections and multiplexing transmitted messages. Multiplayer TLS; fun things can come out of that.
 
+The TLS state may be kept in a file locally or encrypted and uploaded to the `proxy` if the user does not wish to keep state on their machine across sessions.
+TODO think about: salt with hostname/port; + ?randomly generated that the user has to write down?; + ?key material from the private part of the certificate?; passphrase
+
 ### Threat model
 
 The `proxy` is considered a potential adversary.
@@ -112,7 +115,7 @@ Since the `seq_num` is not sent in cleartext, we need to continually tag records
       - unless PINGs have already been with seq_num lower than `{seq_num offset} + {seq_num count}` in which case a `STATUS_ANSWER` for the `{connection id}` is returned
     - action: drop queued PINGs with `{seq_num}` lower than `{seq_num offset}` + `{seq_num count}`, if there are any
 
-  - `QUEUE` `{connection id}` `{seq_num offset}` `{count seq_num}` `{PING record [seq_num offset]}` `{PING record [seq_num ...]}` `{PING record [seq_num offset + count seq_num]}`
+  - `QUEUE` `{connection id}` `{seq_num offset}` `{count seq_num}` `{PING record [offset + count-1]}` `{PING record [offset - count-2 ...]}` `{PING record [offset-count - 0]}`
     - return: `STATUS_ANSWER` for the `{connection id}`
     - action: store the PING records in the queue for the given `{connection id}`
 

@@ -2,19 +2,19 @@ open Rresult
 open Bitstring
 
 type client_operation =
-| Connect
-| Outgoing
-| Queue
-| Ack
-| Status
-| Fetch
-| Subscribe
+| Connect   (* connect to a server/port *)
+| Outgoing  (* send an outgoing message (to the connected server/port) *)
+| Queue     (* queue messages to be sent at the interval when inactive *)
+| Incoming_ACK (* tell the server which buffered messages it may shred *)
+| Status    (* status of open connections, current sequence number, etc *)
+| Fetch     (* ask for specific elements in the Incoming buffer *)
+| Subscribe (* subscribe to a connection (like a continuos stream of Fetch) *)
 
 let opcode_of_client_operation = function
 | Connect   -> "\x41"
 | Outgoing  -> "\x42"
 | Queue     -> "\x43"
-| Ack       -> "\x44"
+| Incoming_ACK -> "\x44"
 | Status    -> "\x45"
 | Fetch     -> "\x46"
 | Subscribe -> "\x47"
@@ -25,21 +25,29 @@ let operation_of_opcode = function
 | '\x41' -> Connect
 | '\x42' -> Outgoing
 | '\x43' -> Queue
-| '\x44' -> Ack
+| '\x44' -> Incoming_ACK
 | '\x45' -> Status
 | '\x46' -> Fetch
 | '\x47' -> Subscribe
 | _      -> raise Invalid_opcode
 
 type server_operation =
-| Connect_answer
-| Status_answer
-| Incoming
+| Connect_answer (* inform the client whether or not a Connect succeeded *)
+| Status_answer  (* respond to a Status query *)
+| Incoming       (* send a record from server->client *)
+| Outgoing_ACK   (* tell the client to shred received outgoing messages *)
 
 let opcode_of_server_operation = function
 | Connect_answer -> "\x61"
 | Status_answer  -> "\x62"
 | Incoming       -> "\x63"
+| Outgoing_ACK   -> "\x64"
+
+let int64_max a b =
+  if  1 = Int64.compare a b then a else b
+
+let int64_min a b =
+  if -1 = Int64.compare a b then a else b 
 
 let c_prepend_length_and_opcode opcode msg =
   let msg = string_of_bitstring msg in
@@ -121,9 +129,12 @@ let serialize_status_answer connections =
           |> bitstring_of_string |> s_prepend_length_and_opcode Status_answer
   in serialize connections
 
-let serialize_incoming msg =
+let serialize_incoming conn_id next_seq_num queued_seq_num msg =
   BITSTRING {
-    msg : -1 : string
+     conn_id        : 32 : int, unsigned, bigendian
+  ;  next_seq_num   : 64 : int, unsigned, bigendian
+  ;  queued_seq_num : 64 : int, unsigned, bigendian
+  ;  msg : -1 : string
   } |> s_prepend_length_and_opcode Incoming
 
 let serialize_connect_answer conn_id address port =
@@ -132,6 +143,19 @@ let serialize_connect_answer conn_id address port =
   ; port     : 16 : int, unsigned, bigendian
   ; address  : -1 : string
   } |> s_prepend_length_and_opcode Connect_answer
+
+let serialize_outgoing_ack (conn_id : int32) status seq_num next_seq_num =
+  let status =
+    match status with
+    | `Ok     -> 0
+    | `Resend -> 1
+  in
+  BITSTRING
+  { conn_id      : 32 : int, unsigned, bigendian
+  ; status       :  8 : int, unsigned, bigendian
+  ; seq_num      : 64 : int, unsigned, bigendian
+  ; next_seq_num : 64 : int, unsigned, bigendian
+  } |> s_prepend_length_and_opcode Outgoing_ACK
 
 let read_msg_len msg =
   let msg_len = String.length msg in
@@ -185,7 +209,7 @@ let unserialized_of_client_msg msg =
           ; tl  :  -1 : bitstring
           } -> unpack_msgs (msg :: acc) tl
         | { _ } as x when 0 = bitstring_length x ->
-            `Queue (conn_id , seq_num , List.(rev acc)) (*TODO tag each?*)
+            `Queue (conn_id , seq_num , acc) (*TODO tag each?*)
         | { _ } ->
             `Invalid `Invalid_packet
       )in
@@ -215,8 +239,26 @@ let unserialized_of_server_msg msg =
 
   | { opcode :  8 : string,
         check(opcode = opcode_of_server_operation Incoming)
+    ; conn_id        : 32 : int, unsigned, bigendian
+    ; next_seq_num   : 64 : int, unsigned, bigendian
+    ; queued_seq_num : 64 : int, unsigned, bigendian
     ; msg    : -1 : string
-    } -> `Incoming msg
+    } -> `Incoming (conn_id , next_seq_num , queued_seq_num , msg)
+
+  | { opcode   :  8 : string,
+        check(opcode = opcode_of_server_operation Outgoing_ACK)
+    ; conn_id  : 32 : int, unsigned, bigendian, check(conn_id <> 0l)
+    ; status   :  8 : int, unsigned, bigendian,
+        check(0 <= status && status <= 1)
+    ; seq      : 64 : int, unsigned, bigendian
+    ; next_seq : 64 : int, unsigned, bigendian
+    } ->
+      let status =
+        begin match status with
+        | 0 -> `Ok
+        | 1 -> `Resend
+        | _ -> failwith "TODO should never happen" end
+      in `Outgoing_ACK (conn_id , status , seq , next_seq)
 
   | { opcode :  8 : string,
         check(opcode = opcode_of_server_operation Status_answer)

@@ -26,12 +26,18 @@ let owner_fp_of_state tls_state =
   `SHA256
   |> Cstruct.to_string
 
-let handle_incoming ic incoming incoming_condition () =
+let handle_incoming conn_id ic incoming incoming_condition outgoing () =
   let rec loop () =
     Lwt_io.read ~count:65537 ic >>= fun input ->
     if "" = input then raise End_of_file else
-    Lwt_io.printf "handle_incoming: %d bytes read\n" String.(length input) >>= fun () ->
-    Queue.add (serialize_incoming input) incoming ;
+    let next_queued , max_queued =
+      Queue.fold (fun (next , max) -> fun (seq,_) ->
+        (int64_min seq next , int64_max seq max)
+      )
+      (Int64.max_int , 0L) outgoing 
+    in
+    Lwt_io.printf "handle_incoming: %d bytes read nextq: %Ld queued: %Ld\n" String.(length input)  next_queued max_queued >>= fun () ->
+    Queue.add (serialize_incoming conn_id next_queued max_queued input) incoming ;
     Lwt_condition.broadcast incoming_condition 1 ;
     loop ()
   in
@@ -72,8 +78,8 @@ let handle_interval conn_id () =
     | false ->
       let rec get_pong () =
         begin match Queue.pop x.outgoing with
-        | (discard , _) when discard < x.seq_num -> get_pong ()
-        | (s , msg) -> s , msg (* TODO consider guard on s = x.seq_num ? *)
+        | (s , msg) when s = x.seq_num -> s , msg
+        | (_ , _) (*when discard < x.seq_num*) -> get_pong ()
         | exception Queue.Empty -> x.seq_num , "" (* give up TODO kill connection *)
         end
       in
@@ -81,8 +87,11 @@ let handle_interval conn_id () =
       | _ , "" | 0L , _ ->
           Lwt_io.eprintf "UNABLE TO SEND PING FOR %s:%d, TODO kill connection\n" x.address x.port
       | seq_num , msg ->
-          Lwt_io.eprintf "SENDING PING %Ld -> %Ld\n" x.seq_num seq_num >>= fun () ->
-          Hashtbl.replace connections conn_id {x with seq_num ; last_output_time = now } ;
+          Lwt_io.eprintf "SENDING PING %Ld -> %Ld (remaining: %d)\n" x.seq_num seq_num Queue.(length x.outgoing) >>= fun () ->
+          Hashtbl.replace connections conn_id
+            {x with
+              seq_num = Int64.succ x.seq_num
+            ; last_output_time = now } ;
           Lwt_io.write x.oc msg
       end
     end
@@ -126,7 +135,7 @@ let cmd_connect tls_state client_oc (`Connect (interval , address , port)) =
   Lwt_io.write client_oc (serialize_connect_answer Int32.(of_int id) address port)
   >>= fun () ->
   Lwt.async (handle_subscribe us.incoming_condition us.incoming client_oc ) ;
-  Lwt.async (handle_incoming us.ic us.incoming us.incoming_condition) ;
+  Lwt.async (handle_incoming Int32.(of_int id) us.ic us.incoming us.incoming_condition us.outgoing) ;
   Lwt.async (handle_interval id) ;
   return ()
 
@@ -176,7 +185,20 @@ let handle_server (tls_state , (ic, (oc : Lwt_io.output_channel))) () =
           ; last_output_time = Unix.time ()
           } ;
           Lwt_io.write x.oc msg
-          >> loop 2 ""
+          (* TODO xxx
+          >>=fun()->
+          (serialize_outgoing_ack Int32.(of_int conn_id (*TODO*)) `Ok pkt_seq_num x.seq_num
+          |> Lwt_io.write oc)
+          *)
+          >>=fun()-> loop 2 ""
+      | _ , d when d < 0L ->
+          (* ask client to resend*)
+          Lwt_io.eprintf "Asking client to resend %Ld as %Ld\n" pkt_seq_num x.seq_num
+          (* TODO xxx
+          >>= fun()->
+          serialize_outgoing_ack Int32.(of_int conn_id (*TODO*)) `Resend pkt_seq_num x.seq_num
+          |> Lwt_io.write oc *)
+          >>=fun()-> loop 2 ""
       | _ , _ ->
           Lwt_io.eprintf "OUTGOING - out of order transmitted seq_num: %Ld; previous: %Ld) -> %Ld\n" pkt_seq_num x.seq_num Int64.(sub pkt_seq_num x.seq_num)
       end
