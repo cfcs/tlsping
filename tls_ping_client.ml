@@ -216,7 +216,7 @@ let handle_irc_client client_in client_out target proxy_details certs =
          begin match tls_state.encryptor with
          | Some {cipher_st ; sequence } ->
              conn_state.tls_state <- {tls_state with encryptor = Some {cipher_st ;
-               sequence = int64_max sequence next_seq
+               sequence = int64_max sequence (if next_seq <> Int64.max_int then next_seq else 0L)
              }}
          | None ->
            conn_state.tls_state <- tls_state
@@ -225,6 +225,7 @@ let handle_irc_client client_in client_out target proxy_details certs =
          begin match resp with
          | Some resp_data ->
              let sequence = begin match tls_state.encryptor with Some crypto_context -> crypto_context.sequence |None->failwith "TODO" end in
+             Lwt_io.eprintf "need to respond\n" >>=fun()->
              Lwt_io.write proxy_out (serialize_outgoing conn_id sequence Cstruct.(to_string resp_data))
          | None -> return ()
          end
@@ -244,7 +245,8 @@ let handle_irc_client client_in client_out target proxy_details certs =
              >>= fun() ->
              Lwt_io.write client_out Cstruct.(to_string msg_data)
              >>=fun()-> send_pings_if_needed conn_id proxy_out
-         | None -> return ()
+         | None ->
+             Lwt_io.eprintf "INCOMING: NO MSGDATA\n"
          end
          >> loop 2 ""
       | `Ok (_ , `Response resp , `Data msg) ->

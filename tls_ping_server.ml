@@ -51,7 +51,6 @@ let handle_subscribe condition_input_available queue oc () =
   (* TODO: should verify owner_fp *)
   let rec loop () =
     Lwt_condition.wait condition_input_available >>= fun amount ->
-    Lwt_io.eprintf "handle_subscribe %d msgs\n" amount >>= fun () ->
     let skip = ref @@ (Queue.(length queue) - amount) in
     let msgs = List.rev @@ Queue.fold (
       fun acc -> fun msg ->
@@ -61,7 +60,8 @@ let handle_subscribe condition_input_available queue oc () =
         end
       ) [] queue
     in
-      Lwt_list.iter_s (*TODO what does _s mean?*) (fun msg -> Lwt_io.write oc msg) msgs
+    Lwt_io.eprintf "handle_subscribe %d msgs popped: %d\n" amount List.(length msgs) >>= fun () ->
+      Lwt_list.iter_s (fun msg -> Lwt_io.write oc msg) msgs
     >>=fun()-> loop ()
   in loop ()
 
