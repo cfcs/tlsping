@@ -75,21 +75,50 @@ let serialize_outgoing conn_id seq_num msg =
   ; msg     : -1 : string
   } |> c_prepend_length_and_opcode Outgoing
 
-let serialize_queue ~conn_id seq_num msgs =
-  let rec s_msg acc = function
-  | msg :: tl ->
-      s_msg
-      ((BITSTRING
-        { String.length msg : 16 : int, unsigned, bigendian
-        ; msg : -1 : string } |> string_of_bitstring)
-      :: acc) tl
-  | [] -> String.concat "" acc
+let serialize_queue ~conn_id seq_num (msgs : string list) : string list =
+  (** splits a list of PINGs into a number of serialized QUEUE
+   *  messages, wrapping at 65535 bytes**)
+  let fst a  = let (t , _, _, _) = a in t in
+  let snd a  = let (_ , t, _, _) = a in t in
+  let thrd a = let (_ , _, t, _) = a in t in
+  let frth a = let (_ , _, _, t) = a in t in
+  let msgs =
+  List.rev @@
+  List.fold_right
+  (*TODO this should be a fold_left to avoid the List.rev *)
+  ( fun msg -> function
+    | (acc_hd :: acc_tl) ->
+    let acc_len = fst acc_hd in
+    let msg =
+      (BITSTRING
+      { String.length msg : 16 : int, unsigned, bigendian
+      ; msg : -1 : string } |> string_of_bitstring)
+    in
+    let msg_len = String.(length msg) in
+    (* check if the msg + (32+64)/8=12 (conn_id and seq_num offset)
+     * -(16+8)/8=3 (length and opcode) will overflow the 16 bit length
+     * and wrap it into separate QUEUE messages accordingly: *)
+    if (1 lsl 16) - 12 - 3 > acc_len + msg_len then
+      ((acc_len + msg_len , msg::(snd acc_hd)
+        , thrd acc_hd , Int64.succ @@ frth acc_hd
+      ):: acc_tl)
+    else
+      (* the msg would overflow, so make a new QUEUE msg: *)
+      let new_seq = frth acc_hd in
+      ((msg_len , [msg] , new_seq , new_seq
+      ) :: acc_hd :: acc_tl)
+    | [] as empty -> empty
+  ) List.(rev msgs) [(0, [], seq_num, seq_num)]
   in
-  BITSTRING
-  { conn_id       : 32 : int, unsigned, bigendian
-  ; seq_num       : 64 : int, unsigned, bigendian
-  ; s_msg [] msgs : -1 : string
-  } |> c_prepend_length_and_opcode Queue
+  List.(fold_right
+  (fun lst -> fun acc ->
+     ((BITSTRING
+      { conn_id  : 32 : int, unsigned, bigendian
+      ; thrd lst : 64 : int, unsigned, bigendian
+      ; String.concat "" (snd lst) : -1 : string}
+     ) |> c_prepend_length_and_opcode Queue)
+     :: acc
+  ) msgs [])
 
 let serialize_subscribe conn_id =
   BITSTRING

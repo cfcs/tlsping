@@ -75,12 +75,12 @@ let send_pings_if_needed conn_id proxy_out =
   let new_offset =
     let rec lol proposed =
     begin match 1 = Int64.compare offset proposed with
-    | false -> begin match 1 = Int64.compare next_seq Int64.(sub proposed 20000L) with
+    | false -> begin match 1 = Int64.compare next_seq Int64.(sub proposed 5L) with
                | false -> proposed
-               | true -> lol Int64.(add proposed 20000L)
+               | true -> lol Int64.(add proposed 10L)
                end
-    | true  -> lol Int64.(add proposed 20000L)
-    end in lol 43200L
+    | true  -> lol Int64.(add proposed 10L)
+    end in lol 10L
   in
   let pings =
     let rec gen_pings acc = function
@@ -107,7 +107,7 @@ let send_pings_if_needed conn_id proxy_out =
         Lwt_io.printf "queuing %Ld\n" seq >>=fun()->
         (return @@ Cstruct.to_string cout)
       ) pings >>= fun pings ->
-      Lwt_io.write proxy_out @@ serialize_queue ~conn_id offset pings
+      Lwt_list.iter_s (fun m -> Lwt_io.write proxy_out m) @@ serialize_queue ~conn_id offset pings
   | Error _ -> Lwt_io.eprintf "outgoing: TODO error generating PINGs\n"
   end
 
