@@ -2,8 +2,6 @@ open Tlsping
 open Rresult
 open Lwt
 
-module L = Lwt_log_core
-
 type encrypt_msg_error =
 | TLS_handshake_not_finished
 | TLS_state_error
@@ -319,25 +317,24 @@ let handle_irc_client client_in client_out target proxy_details certs =
   in loop 2 ""
   end
 
-let handle_client (log_f) (unix_fd, sockaddr) proxy certs () =
+let handle_client (unix_fd, sockaddr) proxy certs () =
   begin match sockaddr with
   | Lwt_unix.ADDR_INET ( _ (*inet_addr*), port) ->
-    log_f "Incoming connection, src port: %d\n" port
+    Lwt_io.eprintf "Incoming connection, src port: %d\n" port
   | Lwt_unix.ADDR_UNIX _ -> return ()
   end >>= fun () ->
   let client_in  = Lwt_io.of_fd Input  unix_fd
   and client_out = Lwt_io.of_fd Output unix_fd in
   match_lwt Socks.receive_request client_in with
   | `Invalid_fingerprint fp ->
-      Lwt_io.eprintf "socks4 handler: invalid sha256 fingerprint: %s\n" fp (* TODO logging*) >>=fun() -> 
-      log_f "%s " 2 (*fp*)
+      Lwt_io.eprintf "socks4 handler: invalid sha256 fingerprint: %s\n" fp (* TODO logging*)
   | `Invalid_request ->
       Lwt_io.eprintf "invalid request!\n" (*TODO failwith / logging *)
   | `Socks4 ({port ; username; address } as target) ->
       Lwt_io.eprintf "got request for host '%s' port %d fp %s\n" address port username >>=fun() ->
       handle_irc_client client_in client_out target proxy certs
 
-let listener_service log (host,port) proxy certs =
+let listener_service (host,port) proxy certs =
   let open Lwt_unix in
   create_socket host >>= function
   | Error () -> failwith "unable to resolve listen addr"
@@ -352,7 +349,7 @@ let listener_service log (host,port) proxy certs =
       | _ -> return (`Error "exn")
     with
     | `Client c ->
-        (Lwt.async (handle_client log c proxy certs) ;
+        (Lwt.async (handle_client c proxy certs) ;
         loop s)
     | `Error _ -> failwith "listener failed, should retry"
   in 
@@ -362,9 +359,7 @@ let run_client listen_host listen_port proxy_host proxy_port ca_public_cert clie
   let listen = (listen_host , listen_port) in
   let proxy  = (proxy_host  , proxy_port) in
   let certs  = ca_public_cert , client_public_cert , client_secret_key in
-  let logger = Lwt_log.channel ~close_mode:`Keep ~channel:Lwt_io.stdout () in
-  let log fmt = L.fatal_f ~logger fmt in
-  Lwt_main.run (listener_service log listen proxy certs)
+  Lwt_main.run (listener_service listen proxy certs)
 
 (***** cmdliner config *****)
 open Cmdliner

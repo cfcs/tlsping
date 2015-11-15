@@ -18,12 +18,11 @@ type connection =
 let connections = Hashtbl.create 10
 
 let owner_fp_of_state tls_state =
-  X509.fingerprint List.(hd Tls.Core.((
+  X509.key_fingerprint ~hash:`SHA256 @@ X509.public_key List.(hd Tls.Core.((
     begin match Tls.Engine.epoch tls_state with
     | `Epoch x -> x
     | `InitialEpoch -> failwith "TODO initialepoch"
     end).peer_certificate))
-  `SHA256
   |> Cstruct.to_string
 
 let handle_incoming conn_id ic incoming incoming_condition outgoing () =
