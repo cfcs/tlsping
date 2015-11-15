@@ -1,115 +1,44 @@
 (* A SOCKS4a helper. Wraps a Lwt file_descr
 
-http://ftp.icm.edu.pl/packages/socks/socks4/SOCKS4.protocol
-
-https://en.wikipedia.org/wiki/SOCKS#SOCKS4a
+   tlsping uses the "user_id" field in socks4 to hold the hex-encoded
+   sha256 fingerprint of the x509 certificate of address:port
 *)
+
 open Lwt
+open Socks4
 
 let connect_client (proxy_fd_in   : Lwt_io.input_channel)
                    (proxy_fd_out  : Lwt_io.output_channel)
                     hostname port : bool Lwt.t =
-  let message = String.concat ""
-    [ (* field 1: SOCKS version *)
-    "\x04"
-      (* field 2: command code: "connect stream": *)
-    ; "\x01"
-      (* field 3: bigendian port: *)
-    ; port land 0xff |> char_of_int |> String.make 0
-    ; port  lsr 8    |> char_of_int |> String.make 0
-      (* field 4: invalid ip: *)
-    ; "\x00\x00\x00\xff"
-      (* field 5: user ID string followed by terminator: *)
-    ; "root" ; "\x00" (* TODO decide on a sane default or make argument *)
-      (* field 6: hostname string followed by terminator: *)
-    ; hostname ; "\x00"
-    ]
-  in
+  let message = Socks4.socks_request ~username:"root" hostname port in
   try_lwt
   Lwt_io.write proxy_fd_out message >>= fun () ->
   Lwt_io.read ~count:(1+1+2+4) proxy_fd_in >>= fun result ->
-  if   result.[0] = '\x00'
-    && result.[1] = '\x5a'
-    (* TODO not checking port *)
-    && result.[4] = '\x00'
-    && result.[5] = '\x00'
-    && result.[6] = '\x00'
-    && result.[7] = '\xff'
-  then
-    return true
-  else
-    return false
+  (*TODO handle case when fewer than 8 bytes are read *)
+  begin match Socks4.parse_response result with
+  | Ok () ->
+      return true
+  | Error _ ->
+      return false
+  end
   with
   | End_of_file -> return false
 
-let socks_response (success : bool) = String.concat ""
-  (* field 1: null byte*)
-  [ "\x00"
-  (* field 2: status, 1 byte 0x5a = granted; 0x5b = rejected/failed : *)
-  ; (if success then "\x5a" else "\x5b")
-  (* Note: the next two fields are "ignored" according to the RFC,
-   * but socat (among other clients) refuses to parse the response
-   * if it's not zeroed out, so that's what we do (same as ssh): *)
-  (* field 3: bigendian port: *)
-  ; String.make 2 '\x00'
-  (* field 4: "network byte order ip address"*)
-  ; String.make 4 '\x00' (* IP *)
-  ]
-
-type socks4_request =
-  { port    : int
-  ; address : string
-  (* tlsping uses the "user_id" field in socks4 to hold the hex-encoded
-   * sha256 fingerprint of the x509 certificate of address:port *)
-  (* TODO: could also have "fp:XXX" and "ca:my.ca.file" here ? *)
-  ; fingerprint : string }
-
-let parse_socks4 (client_fd_in : Lwt_io.input_channel) =
-  let header = Bytes.make 8 '8' in
-  try_lwt(
+let receive_request (client_fd_in : Lwt_io.input_channel) =
+  let header = Bytes.make 0 'A' in
   (* read minimum amount of bytes needed*)
-  Lwt_io.read_into_exactly client_fd_in header 0 (1+1+2+4) >>= fun () ->
-  if not (header.[0] = '\x04' && header.[1] = '\x01')
-  then return `Invalid_request
-  else
-  let port = (int_of_char header.[2] lsl 8) + int_of_char header.[3] in
-  let rec read_until_0 acc max =
-    if max = 0 then return None
-    else
-      Lwt_io.read ~count:1 client_fd_in
-    >>= function
-      | "\x00" -> return @@ Some String.(concat "" acc)
-      | byt    -> read_until_0 (acc @ [byt]) (max - 1)
-  in
-  read_until_0 [] 255
-  >>= function
-  | None -> return `Invalid_request (*no user_id / user_id > 255 *)
-  (* user_id is used as hex-encoded sha256 fingerprint: *)
-  | Some fingerprint when String.(64 <> length fingerprint)
-    -> return @@ `Invalid_fingerprint fingerprint
-  | Some fingerprint ->
-  begin match header.[4] = '\x00'
-           && header.[5] = '\x00'
-           && header.[6] = '\x00' with
-  | true  ->
-      read_until_0 [] 255
+  let rec read_request header =
+    begin match Socks4.parse_request header with
+    | Error `Incomplete_request ->
+      Lwt_io.read_into client_fd_in header 256 Bytes.(length header)
       >>= (function
-      | None -> return `Invalid_request (*no domain name / domain name > 255 *)
-      | Some address -> return @@ `Addr address)
-  | false ->
-    return @@ `Addr (String.concat "." List.(map
-      (fun i -> string_of_int (int_of_char header.[i])) [ 4; 5; 6; 7 ] ))
-  end >>=
-    (function
-    | `Addr address ->
-      return @@ `Socks4 {
-        port
-      ; address
-      ; fingerprint
-      }
-    | (`Invalid_request | `Invalid_fingerprint _ ) as ir
-      -> return ir
-    )
-  )with
-  | End_of_file -> return `Invalid_request
+      | 0 -> return `Invalid_request
+      | _ -> read_request header)
+    | Error `Invalid_request -> return `Invalid_request
+    | Ok (`Socks4 request) ->
+        if 64 <> String.length request.username (*tlsping uses 64byte hex fingerprint for pinning*)
+        then return @@ `Invalid_fingerprint request.username
+        else return @@ `Socks4 request
+    end
+  in read_request header
 

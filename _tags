@@ -3,7 +3,9 @@ true : warn_error(+1..49)
 true : warn(+A-4-6-7-9-40-42-44-48)
 <lib> : include
 
-<lib/socks.ml>: package(lwt), package(lwt.syntax), syntax(camlp4o)
+<lib/socks4.ml>: package(rresult)
+
+<lib/socks.ml>: package(lwt), package(lwt.syntax), syntax(camlp4o), package(rresult)
 
 <lib/tlsping.ml>: package(lwt), package(lwt.syntax), package(tls), package(x509), package(tls.lwt), syntax(camlp4o), package(rresult), package(bitstring), package(bitstring.syntax)
 
