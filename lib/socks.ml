@@ -25,20 +25,19 @@ let connect_client (proxy_fd_in   : Lwt_io.input_channel)
   | End_of_file -> return false
 
 let receive_request (client_fd_in : Lwt_io.input_channel) =
-  let header = Bytes.make 0 'A' in
   (* read minimum amount of bytes needed*)
   let rec read_request header =
     begin match Socks4.parse_request header with
     | Error `Incomplete_request ->
-      Lwt_io.read_into client_fd_in header 256 Bytes.(length header)
+      Lwt_io.read ~count:1 client_fd_in
       >>= (function
-      | 0 -> return `Invalid_request
-      | _ -> read_request header)
+      | "" -> return `Invalid_request
+      | s  -> read_request @@ String.concat "" [header ; s])
     | Error `Invalid_request -> return `Invalid_request
     | Ok (`Socks4 request) ->
         if 64 <> String.length request.username (*tlsping uses 64byte hex fingerprint for pinning*)
         then return @@ `Invalid_fingerprint request.username
         else return @@ `Socks4 request
     end
-  in read_request header
+  in read_request ""
 

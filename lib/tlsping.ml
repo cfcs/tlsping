@@ -120,6 +120,16 @@ let serialize_queue ~conn_id seq_num (msgs : string list) : string list =
      :: acc
   ) msgs [])
 
+(*TODO serialize_incoming_ack *)
+
+let serialize_status first_conn_id last_conn_id =
+  BITSTRING
+  { first_conn_id : 32 : int, unsigned, bigendian
+  ; last_conn_id  : 32 : int, unsigned, bigendian
+  } |> c_prepend_length_and_opcode Status
+
+(*TODO serialize_fetch *)
+
 let serialize_subscribe conn_id =
   BITSTRING
   { conn_id : 32 : int, unsigned, bigendian
@@ -156,7 +166,7 @@ let serialize_status_answer connections =
       }) :: acc) tl
   | [] -> Bytes.concat "" acc
           |> bitstring_of_string |> s_prepend_length_and_opcode Status_answer
-  in serialize connections
+  in serialize [] connections
 
 let serialize_incoming conn_id next_seq_num queued_seq_num msg =
   BITSTRING {
@@ -244,6 +254,16 @@ let unserialized_of_client_msg msg =
       )in
       unpack_msgs [] msgs
 
+  (*TODO handle Incoming_ack *)
+
+  | { opcode : 8 : string,
+        check(opcode = opcode_of_client_operation Status)
+    ; first_conn_id : 32 : int, unsigned, bigendian
+    ; last_conn_id  : 32 : int, unsigned, bigendian, check(first_conn_id <= last_conn_id)
+    } -> `Status (first_conn_id , last_conn_id)
+
+  (*TODO handle fetch *)
+
   | { opcode  :  8 : string,
         check(opcode = opcode_of_client_operation Subscribe)
     ; conn_id : 32 : int, unsigned, bigendian, check(conn_id <> 0l)
@@ -311,9 +331,9 @@ let unserialized_of_server_msg msg =
                 parse_tuples
                 (takebits (bitstring_length header + bitstring_length body) tuples)
                  @@ (conn_id , ping_interval, address, port, seq_num, count_queued) :: acc
-            | { _ } -> `Invalid `Invalid_packet
+            | { _ } -> `Invalid `Invalid_status_answer
             )
-        | { _ } -> `Invalid `Invalid_packet
+        | { _ } -> `Invalid `Invalid_status_answer
         )
       in
       parse_tuples tuples []

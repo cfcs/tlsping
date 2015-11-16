@@ -147,14 +147,40 @@ let handle_irc_client client_in client_out target proxy_details certs =
     Lwt_io.eprintf "err: %s\n" err
   | Ok (proxy_in, proxy_out) ->
   Lwt_io.eprintf "connected to proxy\n" >>= fun() ->
-  begin match serialize_connect 20 (target.Socks4.address, target.port) with
-  | None -> Lwt_io.eprintf "error: unable to serialize connect"
-  | Some connect_msg ->
+
+  (* We are connected to the proxy, ask for current status to identify
+     the case where we need to reconnect to an existing connection: *)
+  Lwt_io.write proxy_out (serialize_status 0l Int32.max_int) >>= fun () ->
+  let rec loop count acc =
+    Lwt_io.printf "loop reading connect status need %d bytes\n" count >>=fun() ->
+    Lwt_io.read ~count proxy_in >>= fun msg ->
+    if "" = msg then failwith "handle_irc_client->loop: connection closed TODO\n" else
+    let msg = String.concat "" [acc ; msg] in
+    begin match unserialized_of_server_msg msg with
+    | `Need_more count -> loop count msg
+    | `Status_answer ans ->
+       Lwt_list.iter_s
+       (function (conn_id , ping_interval, address, port, seq_num, count_queued) ->
+         Lwt_io.eprintf "existing connection: %ld ping interval: %d address: %s port: %d seq_num: %Ld count_queued: %ld\n"
+                        conn_id ping_interval address port seq_num count_queued
+       )
+       ans
+    | `Connect_answer _ | `Incoming _ | `Outgoing_ACK _ ->
+        failwith "TODO got shit from proxy"
+    | `Invalid `Invalid_status_answer ->
+        failwith "TODO failed to decode status_answer"
+    | `Invalid _ ->
+        failwith "TODO got Invalid from proxy"
+    end
+  in loop 2 "" >>= fun () ->
+
   (* Ask the proxy to connect to target.address: *)
+  begin match serialize_connect 20 (target.Socks4.address, target.port) with
+  | None -> Lwt_io.eprintf "error: unable to serialize connect to '%s':%d" target.Socks4.address target.port
+  | Some connect_msg ->
   Lwt_io.write proxy_out connect_msg >>= fun () ->
 
-  (* TODO first of all we should ask for current status *)
-
+  (* Handle response to our CONNECT message: *)
   let rec loop count acc =
     Lwt_io.printf "loop reading connect status need %d bytes\n" count >>=fun() ->
     Lwt_io.read ~count proxy_in >>= fun msg ->
@@ -165,12 +191,12 @@ let handle_irc_client client_in client_out target proxy_details certs =
     | _ as m -> return m
     end
   in loop 2 "" >>= function
-  | `Invalid _ | `Status_answer _ | `Incoming _ |`Need_more _ | `Outgoing_ACK _ ->
-      Lwt_io.eprintf "error from proxy: unexpected message received\n"
-  | `Connect_answer (conn_id , _ , _) when conn_id = 0l -> (* if failed *)
-      Lwt_io.eprintf "error from proxy: no connect to %s\n" target.address
-      (*TODO kill connection*)
-  | `Connect_answer (conn_id , _ , _) ->
+    | `Invalid _ | `Status_answer _ | `Incoming _ |`Need_more _ | `Outgoing_ACK _ ->
+        Lwt_io.eprintf "error from proxy: unexpected message received\n"
+    | `Connect_answer (conn_id , _ , _) when conn_id = 0l -> (* if failed *)
+        Lwt_io.eprintf "error from proxy: no connect to %s\n" target.address
+        (*TODO kill connection*)
+    | `Connect_answer (conn_id , _ , _) ->
   Lwt_io.eprintf "yo I have a conn_id %ld\n" conn_id >>= fun () ->
   (* Initialize TLS connection from client -> target *)
   X509_lwt.authenticator (`Hex_key_fingerprints (`SHA256 ,
@@ -233,7 +259,7 @@ let handle_irc_client client_in client_out target proxy_details certs =
          begin match msg with
          | Some msg_data ->
              (* TODO
-             String.index_from ":havana.baconsvin.org PONG havana.baconsvin.org :TLSPiNG:10" 0 ' '
+             String.index_from ":server.example.org PONG server.example.org :TLSPiNG:10" 0 ' '
              let first_space = 1 + String.index_from msg_data 0 ' ' in
              let second_space = String.index_from msg_data first_space ' ' in
              let server = String.sub msg_data 1 (first_space -2) in

@@ -17,6 +17,15 @@ type connection =
 
 let connections = Hashtbl.create 10
 
+let connection_status_of_connection conn_id conn : Tlsping.connection_status =
+  { conn_id
+  ; ping_interval = conn.interval
+  ; address       = conn.address
+  ; port          = conn.port
+  ; seq_num       = conn.seq_num
+  ; queue_length  = Queue.length conn.outgoing |> Int32.of_int
+  }
+
 let owner_fp_of_state tls_state =
   X509.key_fingerprint ~hash:`SHA256 @@ X509.public_key List.(hd Tls.Core.((
     begin match Tls.Engine.epoch tls_state with
@@ -148,7 +157,7 @@ let handle_server (tls_state , (ic, (oc : Lwt_io.output_channel))) () =
   Lwt_io.printf "entering loop, reading %d B\n" needed_len >>
   Lwt_io.read ~count:needed_len ic >>= fun msg ->
   (* handle EOF: *)
-  if msg = "" then return () else
+  if msg = "" then Lwt_io.eprintf "handle_server loop: broken read\n" >>= fun() -> return () else
   Lwt_io.printf "client->server msg: %d: [%s]\t\t%s\n" String.(length msg)
     (hex acc) (hex msg) >>
   let msg = String.concat "" [acc ; msg] in
@@ -166,6 +175,16 @@ let handle_server (tls_state , (ic, (oc : Lwt_io.output_channel))) () =
       Lwt_io.printf "CONNECT request for ping interval %d, host '%s':%d\n"
                     ping_interval address port
       >> cmd_connect tls_state oc params
+      >> loop 2 ""
+  | `Status (first_conn_id , last_conn_id) ->
+      Lwt_io.printf "STATUS %ld - %ld, sending response\n" first_conn_id last_conn_id >>= fun() ->
+      let conn_statuses = Hashtbl.fold
+        (fun conn_id -> fun conn -> fun acc ->
+            connection_status_of_connection Int32.(of_int conn_id) conn :: acc )
+        connections
+        [] |> List.rev
+      in
+      Lwt_io.write oc (serialize_status_answer conn_statuses)
       >> loop 2 ""
   | `Outgoing (conn_id , pkt_seq_num , count , msg) ->
       Lwt_io.printf "OUTGOING for conn %ld seq %Ld count %d msg: %s\n"
