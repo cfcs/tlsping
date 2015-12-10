@@ -160,20 +160,26 @@ let handle_irc_client client_in client_out target proxy_details certs =
     | `Need_more count -> loop count msg
     | `Status_answer ans ->
        Lwt_list.iter_s
-       (function (conn_id , ping_interval, address, port, seq_num, count_queued) ->
+       (function (conn_id , ping_interval, address, port, seq_num, max_covered_sequence) ->
+         if target.Socks4.address = address && target.port = port
+         then Lwt_io.eprintf "FOUND EXISTING CONNECTION FOR SAME HOST conn_id: %ld ping int: %d address: %s port: %d seq_num: %Ld queued pings: %ld\n"
+                             conn_id ping_interval address port seq_num max_covered_sequence
+              (* need to decrypt or supply tls engine state: Hashtbl.replace states { tls_state = Tls.Engine.state ; outgoing = [] ; address ; port ; max_covered_sequence } *)
+         else
          Lwt_io.eprintf "existing connection: %ld ping interval: %d address: %s port: %d seq_num: %Ld count_queued: %ld\n"
-                        conn_id ping_interval address port seq_num count_queued
+                        conn_id ping_interval address port seq_num max_covered_sequence
        )
        ans
     | `Connect_answer _ | `Incoming _ | `Outgoing_ACK _ ->
         failwith "TODO got shit from proxy"
     | `Invalid `Invalid_status_answer ->
-        failwith "TODO failed to decode status_answer"
+        failwith @@ "TODO failed to decode status_answer: " ^ msg
     | `Invalid _ ->
         failwith "TODO got Invalid from proxy"
     end
   in loop 2 "" >>= fun () ->
 
+  (*TODO: only if we don't have an existing state: *)
   (* Ask the proxy to connect to target.address: *)
   begin match serialize_connect 20 (target.Socks4.address, target.port) with
   | None -> Lwt_io.eprintf "error: unable to serialize connect to '%s':%d" target.Socks4.address target.port

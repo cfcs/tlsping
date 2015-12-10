@@ -153,7 +153,7 @@ let s_prepend_length_and_opcode opcode msg =
   } |> string_of_bitstring
 
 let serialize_status_answer connections =
-  let rec serialize (acc : bytes list)= function
+  let rec serialize (acc : bytes list) = function
   | { conn_id ; ping_interval ; address ; port ; seq_num ; queue_length } :: tl ->
       serialize (string_of_bitstring (BITSTRING
       { conn_id       : 32 : int, unsigned, bigendian
@@ -317,22 +317,19 @@ let unserialized_of_server_msg msg =
         if 0 = Bitstring.bitstring_length tuples then
           `Status_answer acc
         else
-        (bitmatch Bitstring.takebits (32 + 16 + 8) tuples with
+        (bitmatch tuples with
         | { conn_id       : 32 : int, unsigned, bigendian
-          ; ping_interval : 16 : int, unsigned, bigendian
+          ; ping_interval : 16 : int, unsigned, bigendian (* in seconds *)
           ; port          : 16 : int, unsigned, bigendian
           ; addr_len      :  8 : int, unsigned, bigendian, bind(addr_len * 8)
-          } as header ->
-            (bitmatch Bitstring.takebits (addr_len + 16 +32 + 32) tuples with
-            | { address      : addr_len : string
-              ; seq_num      : 64 : int, unsigned, bigendian
-              ; count_queued : 32 : int, unsigned, bigendian (* amount of PINGs queued *)
-              } as body ->
+          ; address       : addr_len : string
+          ; seq_num       : 64 : int, unsigned, bigendian (* next write seq_num expected by the destination *)
+          ; count_queued  : 32 : int, unsigned, bigendian (* amount of PINGs queued *)
+          ; tail          : -1 : bitstring
+          } ->
                 parse_tuples
-                (takebits (bitstring_length header + bitstring_length body) tuples)
-                 @@ (conn_id , ping_interval, address, port, seq_num, count_queued) :: acc
-            | { _ } -> `Invalid `Invalid_status_answer
-            )
+                (tail)
+             @@ (conn_id , ping_interval, address, port, seq_num, count_queued) :: acc
         | { _ } -> `Invalid `Invalid_status_answer
         )
       in
