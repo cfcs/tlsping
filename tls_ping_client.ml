@@ -122,6 +122,7 @@ let handle_outgoing conn_id client_in proxy_out () =
     begin match conn_state.tls_state.encryptor with
     | None ->
         Lwt_io.eprintf "TODO error no encryptor state\n"
+        (*TODO should queue this and send it as soon as the TLS session is established *)
     | Some {sequence = target_sequence; _ } ->
         begin match encrypt_queue conn_state.tls_state [line] target_sequence with
         | Ok ( tls_state , msg_list ) ->
@@ -131,6 +132,7 @@ let handle_outgoing conn_id client_in proxy_out () =
                 serialize_outgoing conn_id msg_sequence Cstruct.(to_string cout)
               ) msg_list |> String.concat ""
             in
+            (*TODO: if this fails, wait for reconnect: *)
             Lwt_io.write proxy_out serialized_msgs >>= fun() ->
             send_pings_if_needed conn_id proxy_out
         | Error _ -> Lwt_io.eprintf "Unable to encrypt and send outgoing message\n"
@@ -151,96 +153,80 @@ let handle_irc_client client_in client_out target proxy_details certs =
   (* We are connected to the proxy, ask for current status to identify
      the case where we need to reconnect to an existing connection: *)
   Lwt_io.write proxy_out (serialize_status 0l Int32.max_int) >>= fun () ->
-  let rec loop count acc =
-    Lwt_io.printf "loop reading connect status need %d bytes\n" count >>=fun() ->
-    Lwt_io.read ~count proxy_in >>= fun msg ->
-    if "" = msg then failwith "handle_irc_client->loop: connection closed TODO\n" else
-    let msg = String.concat "" [acc ; msg] in
-    begin match unserialized_of_server_msg msg with
-    | `Need_more count -> loop count msg
-    | `Status_answer ans ->
-       Lwt_list.iter_s
-       (function (conn_id , ping_interval, address, port, seq_num, max_covered_sequence) ->
-         if target.Socks4.address = address && target.port = port
-         then Lwt_io.eprintf "FOUND EXISTING CONNECTION FOR SAME HOST conn_id: %ld ping int: %d address: %s port: %d seq_num: %Ld queued pings: %ld\n"
-                             conn_id ping_interval address port seq_num max_covered_sequence
-              (* need to decrypt or supply tls engine state: Hashtbl.replace states { tls_state = Tls.Engine.state ; outgoing = [] ; address ; port ; max_covered_sequence } *)
-         else
-         Lwt_io.eprintf "existing connection: %ld ping interval: %d address: %s port: %d seq_num: %Ld count_queued: %ld\n"
-                        conn_id ping_interval address port seq_num max_covered_sequence
-       )
-       ans
-    | `Connect_answer _ | `Incoming _ | `Outgoing_ACK _ ->
-        failwith "TODO got shit from proxy"
-    | `Invalid `Invalid_status_answer ->
-        failwith @@ "TODO failed to decode status_answer: " ^ msg
-    | `Invalid _ ->
-        failwith "TODO got Invalid from proxy"
-    end
-  in loop 2 "" >>= fun () ->
 
-  (*TODO: only if we don't have an existing state: *)
-  (* Ask the proxy to connect to target.address: *)
-  begin match serialize_connect 20 (target.Socks4.address, target.port) with
-  | None -> Lwt_io.eprintf "error: unable to serialize connect to '%s':%d" target.Socks4.address target.port
-  | Some connect_msg ->
-  Lwt_io.write proxy_out connect_msg >>= fun () ->
+  let string_of_state = function
+  | `Initial_status_answer -> "Initial_status_answer"
+  | `Handle_connect_response -> "Handle_connect_response"
+  | `Established -> "Established"
+  and fatal msg = return (`Fatal msg)
+  in
 
-  (* Handle response to our CONNECT message: *)
-  let rec loop count acc =
-    Lwt_io.printf "loop reading connect status need %d bytes\n" count >>=fun() ->
-    Lwt_io.read ~count proxy_in >>= fun msg ->
-    if "" = msg then failwith "handle_irc_client->loop: connection closed TODO\n" else
-    let msg = String.concat "" [acc ; msg] in
-    begin match unserialized_of_server_msg msg with
-    | `Need_more count -> loop count msg
-    | _ as m -> return m
-    end
-  in loop 2 "" >>= function
-    | `Invalid _ | `Status_answer _ | `Incoming _ |`Need_more _ | `Outgoing_ACK _ ->
-        Lwt_io.eprintf "error from proxy: unexpected message received\n"
-    | `Connect_answer (conn_id , _ , _) when conn_id = 0l -> (* if failed *)
-        Lwt_io.eprintf "error from proxy: no connect to %s\n" target.address
-        (*TODO kill connection*)
-    | `Connect_answer (conn_id , _ , _) ->
-  Lwt_io.eprintf "yo I have a conn_id %ld\n" conn_id >>= fun () ->
-  (* Initialize TLS connection from client -> target *)
-  X509_lwt.authenticator (`Hex_key_fingerprints (`SHA256 ,
-                            [target.address , target.username] ))
-  >>= fun authenticator ->
-  return @@ Tls.Config.client
-     ~authenticator
-     ~ciphers:[ `TLS_DHE_RSA_WITH_AES_256_CBC_SHA256
-              ; `TLS_DHE_RSA_WITH_AES_256_CBC_SHA ] (*TODO allow AES_128 ?*)
-     ~version:Tls.Core.(TLS_1_2 , TLS_1_2) (* g *)
-     ~hashes:[`SHA256 ; `SHA1] ()
-  >>= fun tls_config ->
-  return @@ Tls.Engine.client tls_config
-  >>= fun (tls_state, client_hello) ->
-  (* Initiate a TLS connection: *)
-  Hashtbl.add states conn_id {tls_state; outgoing = [] ; address = target.address ; port = target.port ; max_covered_sequence = 0L } ;
-  Lwt_io.write proxy_out (serialize_outgoing conn_id 0L Cstruct.(to_string client_hello)) >>= fun () ->
-
-  (* setup thread that encrypts outgoing messages by proxy *)
-  Lwt.async (handle_outgoing conn_id client_in proxy_out) ;
-
-  (* successfully connected; handle answers *)
-  let rec loop needed_len acc =
+  let rec loop ~state needed_len acc =
     Lwt_io.printf "entering loop - %d\n" needed_len >>= fun () ->
     Lwt_io.read ~count:needed_len proxy_in >>= fun msg ->
-    if msg = "" then return () else
+    if "" = msg then fatal "handle_irc_client->loop: connection closed TODO" else
     let msg = String.concat "" [acc ; msg] in
-    begin match unserialized_of_server_msg msg with
-    | `Need_more needed_len ->
-      Lwt_io.printf "Reading from server: Need more bytes: %d\n" needed_len
-      >> loop needed_len msg
+    begin match state , unserialized_of_server_msg msg with
+    | _ , `Need_more count ->
+        loop ~state count msg
 
-    | `Connect_answer _ ->
-      Lwt_io.printf "CONNECT_ANSWER\n"
-      (* TODO don't automatically assume CONNECT was successful *)
-      >> loop 2 ""
+    | _ , `Invalid _ ->
+        fatal @@ "Failed to decode received data in state " ^ (string_of_state state)
 
-    | `Incoming (conn_id , next_seq , queued_seq , msg) ->
+    | (`Initial_status_answer, (`Connect_answer _|`Incoming _|`Outgoing_ACK _))
+    | (`Established, `Connect_answer _)
+    | (`Handle_connect_response, (`Incoming _|`Outgoing_ACK _|`Status_answer _))
+    ->  (* Handle invalid combinations of (state , received msg): *)
+        fatal @@ "invalid (parseable) msg received in state " ^ (string_of_state state) ^ "received: " ^ msg
+
+    | `Initial_status_answer , `Status_answer ans ->
+      Lwt_list.iter_s
+      (function (conn_id , ping_interval, address, port, seq_num, max_covered_sequence) ->
+        if target.Socks4.address = address && target.port = port
+        then Lwt_io.eprintf "FOUND EXISTING CONNECTION FOR SAME HOST conn_id: %ld ping int: %d address: %s port: %d seq_num: %Ld queued pings: %ld\n"
+                            conn_id ping_interval address port seq_num max_covered_sequence
+             (* need to decrypt or supply tls engine state: Hashtbl.replace states { tls_state = Tls.Engine.state ; outgoing = [] ; address ; port ; max_covered_sequence } *)
+        else
+        Lwt_io.eprintf "existing connection: %ld ping interval: %d address: %s port: %d seq_num: %Ld count_queued: %ld\n"
+                       conn_id ping_interval address port seq_num max_covered_sequence
+      )
+      ans >>= fun () ->
+      (*TODO: only if we don't have an existing state: *)
+      (* Ask the proxy to connect to target.address: *)
+      begin match serialize_connect 20 (target.Socks4.address, target.port) with
+      | None -> Lwt_io.eprintf "error: unable to serialize connect to '%s':%d" target.Socks4.address target.port
+      | Some connect_msg ->
+         Lwt_io.write proxy_out connect_msg
+      end
+      >> return `Handle_connect_response
+
+    (* Handle response to our CONNECT message: *)
+    | `Handle_connect_response , `Connect_answer (conn_id , _ , _) when conn_id = 0l -> (* if failed *)
+      fatal @@ Printf.sprintf "error from proxy: no connect to %s" target.address
+      (*TODO kill connection*)
+    | `Handle_connect_response , `Connect_answer (conn_id , _ , _) ->
+      Lwt_io.eprintf "yo I have a conn_id %ld\n" conn_id >>= fun () ->
+      (* Initialize TLS connection from client -> target *)
+      X509_lwt.authenticator (`Hex_key_fingerprints (`SHA256 ,
+                             [target.address , target.username] ))
+      >>= fun authenticator ->
+      return @@ Tls.Config.client
+        ~authenticator
+        ~ciphers:[ `TLS_DHE_RSA_WITH_AES_256_CBC_SHA256
+                 ; `TLS_DHE_RSA_WITH_AES_256_CBC_SHA ] (*TODO allow AES_128 ?*)
+        ~version:Tls.Core.(TLS_1_2 , TLS_1_2) (* g *)
+        ~hashes:[`SHA256 ; `SHA1] ()
+      >>= fun tls_config ->
+      return @@ Tls.Engine.client tls_config
+      >>= fun (tls_state, client_hello) ->
+      (* Initiate a TLS connection: *)
+      Hashtbl.add states conn_id {tls_state; outgoing = [] ; address = target.address ; port = target.port ; max_covered_sequence = 0L } ;
+      Lwt_io.write proxy_out (serialize_outgoing conn_id 0L Cstruct.(to_string client_hello)) >>= fun () ->
+      (* setup thread that encrypts outgoing messages by proxy *)
+      Lwt.async (handle_outgoing conn_id client_in proxy_out) ;
+      return @@ `Established
+
+    | `Established , `Incoming (conn_id , next_seq , queued_seq , msg) ->
       (* TODO decrypt ; handle write errors; buffer if client disconnected? *)
       let conn_state = Hashtbl.find states conn_id in (*TODO handle not found?*)
       begin match Tls.Engine.handle_tls conn_state.tls_state Cstruct.(of_string msg) with
@@ -280,16 +266,16 @@ let handle_irc_client client_in client_out target proxy_details certs =
          | None ->
              Lwt_io.eprintf "INCOMING: NO MSGDATA\n"
          end
-         >> loop 2 ""
+         >> return @@ `Established
       | `Ok (_ , `Response resp , `Data msg) ->
           let _ = resp , msg in (*TODO*)
-          Lwt_io.eprintf "TLS EOF or ALERT\n"
+          fatal "TLS EOF or ALERT"
       | `Fail (failure , `Response resp) ->
           let _ = resp in (*TODO*)
-          Lwt_io.eprintf "TLS FAIL: %s\n" @@ Tls.Engine.string_of_failure failure
+          fatal @@ Printf.sprintf "TLS FAIL: %s" @@ Tls.Engine.string_of_failure failure
       end
 
-    | `Outgoing_ACK (conn_id , ((`Ok | `Resend) as status) , acked_seq , next_seq) ->
+    | `Established , `Outgoing_ACK (conn_id , ((`Ok | `Resend) as status) , acked_seq , next_seq) ->
       (* TODO update next_seq *)
       let conn_state = Hashtbl.find states conn_id in (*TODO handle not found?*)
       begin match status with
@@ -305,7 +291,7 @@ let handle_irc_client client_in client_out target proxy_details certs =
          conn_state.outgoing <- outgoing ;
          Hashtbl.replace states conn_id conn_state ;
          Lwt_io.eprintf "outgoing ack: TODO cleanup buffers\n"
-         >>=fun() -> loop 2 ""
+         >> return @@ `Established
       | `Resend ->
         begin match conn_state.tls_state.encryptor with
         | Some encryptor ->
@@ -320,7 +306,7 @@ let handle_irc_client client_in client_out target proxy_details certs =
               in rec_l conn_state.outgoing
             in
             begin match encrypt_queue conn_state.tls_state [line] next_seq with
-            | Error _ -> Lwt_io.eprintf "resend, but error re-encrypting TODO die ns:%Ld\n" next_seq
+            | Error _ -> return @@ `Fatal (Printf.sprintf "resend, but error re-encrypting TODO die ns:%Ld" next_seq)
             | Ok (tls_state , msg_list) ->
                 conn_state.tls_state <- tls_state ;
                 let msgs = List.map (fun (resent_seq, cout) ->
@@ -332,21 +318,31 @@ let handle_irc_client client_in client_out target proxy_details certs =
                 Hashtbl.replace states conn_id conn_state ;
                 Lwt_io.write proxy_out String.(concat "" msgs)
                 >> send_pings_if_needed conn_id proxy_out
+                >> return @@ `Established
             end
-          else Lwt_io.eprintf "TODO was asked to resend, but acked %Ld ; next %Ld ; current encryptor.seq %Ld\n" acked_seq next_seq encryptor.sequence
-        | None -> Lwt_io.eprintf "resend, but no connection TODO die\n"
+          else
+            fatal @@ Printf.sprintf "TODO was asked to resend, but acked %Ld ; next %Ld ; current encryptor.seq %Ld"
+              acked_seq next_seq encryptor.sequence
+        | None ->
+            fatal "resend, but no connection TODO die"
         end
       end
-      >> loop 2 ""
 
-    | `Status_answer _ ->
+    | `Established , `Status_answer _ ->
       Lwt_io.printf "STATUS_ANSWER\n"
-      >> loop 2 ""
+      >> return @@ `Established
 
-    | `Invalid _ ->
-      Lwt_io.eprintf "Got invalid packet from server; shutting down\n"
-    end
-  in loop 2 ""
+    end (* begin match state_machine *)
+    >>= function
+    | (`Established | `Handle_connect_response) as new_state ->
+      loop ~state:(new_state) 2 ""
+    | fatal -> return fatal
+  in
+  begin match_lwt loop ~state:`Initial_status_answer 2 "" with
+  | `Fatal msg ->
+      Lwt_io.eprintf "%s\n" msg
+  | _ ->
+      failwith "TODO unhandled exit state\n"
   end
 
 let handle_client (unix_fd, sockaddr) proxy certs () =

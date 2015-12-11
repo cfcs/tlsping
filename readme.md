@@ -6,7 +6,7 @@ _A daemon that sends PINGs over TLS._
 
 ### Terminology
 - TLS v1.2 RFC: [TLS v1.2 protocol](https://tools.ietf.org/html/rfc5246)
-- supported cipher suites: `tls-pingd` is implemented for the following CipherSuites, see [TLS v1.2: CipherSuites](https://tools.ietf.org/html/rfc3268) for details
+- supported cipher suites: `tls-ping` is implemented for the following CipherSuites, see [TLS v1.2: CipherSuites](https://tools.ietf.org/html/rfc3268) for details
   - `TLS_DHE_RSA_AES_256_CBC_SHA`
   - `TLS_DHE_RSA_AES_256_CBC_SHA256`
 - `proxy `: `tls-ping-server` running on a potentially untrusted machine (ie. VPS)
