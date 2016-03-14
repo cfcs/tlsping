@@ -18,8 +18,8 @@ let socks_request ~username hostname port =
       (* field 2: command code: "connect stream": *)
     ; "\x01"
       (* field 3: bigendian port: *)
-    ; port land 0xff |> char_of_int |> String.make 0
-    ; port  lsr 8    |> char_of_int |> String.make 0
+    ; (port land 0xff00) lsr 8 |> char_of_int |> String.make 1
+    ;  port land 0xff          |> char_of_int |> String.make 1
       (* field 4: invalid ip: *)
     ; "\x00\x00\x00\xff"
       (* field 5: user ID string followed by terminator: *)
