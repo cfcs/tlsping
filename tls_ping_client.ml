@@ -54,7 +54,7 @@ let connect_proxy client_out (host , port) certs =
         Tls_lwt.Unix.client_of_fd config ~host:"proxy.example.org" fd (* TODO "proxy.example.org" should obviously be a parameter, testing only! *)
         >>= fun tls_t ->
         Lwt_io.write client_out @@ Socks4.socks_response true >>=fun()->
-        return @@ R.ok Tls_lwt.(of_t tls_t)
+        (return @@ R.ok Tls_lwt.(of_t tls_t))
   with
   | Unix.Unix_error (Unix.ECONNREFUSED, f_n , _) ->
       Lwt_io.write client_out @@ Socks4.socks_response false >>=fun()->
@@ -62,7 +62,7 @@ let connect_proxy client_out (host , port) certs =
   | Tls_lwt.Tls_failure err ->
       return @@ R.error @@ "Tls_failure: " ^
       begin match err with
-      | `Error (`AuthenticationFailure (`InvalidServerName _ as valerr)) ->
+      | `Error (`AuthenticationFailure (valerr)) ->
         "ServerName mismatch: " ^ X509.Validation.validation_error_to_string valerr
       | _ -> Tls.Engine.string_of_failure err
       end
@@ -368,7 +368,7 @@ let listener_service (host,port) proxy certs =
   | Error () -> failwith "unable to resolve listen addr"
   | Ok (s , host_inet_addr) ->
   let () = setsockopt s SO_REUSEADDR true in
-  let () = bind s (ADDR_INET (host_inet_addr, port )) in
+  bind s (ADDR_INET (host_inet_addr, port )) >>= fun () ->
   let () = listen s 10 in
   let rec loop s =
     match_lwt

@@ -27,11 +27,11 @@ let connection_status_of_connection conn_id conn : Tlsping.connection_status =
   }
 
 let owner_fp_of_state tls_state =
-  X509.key_fingerprint ~hash:`SHA256 @@ X509.public_key List.(hd Tls.Core.((
+  X509.key_fingerprint ~hash:`SHA256 @@ X509.public_key (match Tls.Core.((
     begin match Tls.Engine.epoch tls_state with
     | `Epoch x -> x
     | `InitialEpoch -> failwith "TODO initialepoch"
-    end).peer_certificate))
+    end).peer_certificate) with Some x -> x | None -> failwith "no cert")
   |> Cstruct.to_string
 
 let handle_incoming conn_id ic incoming incoming_condition outgoing () =
@@ -250,7 +250,7 @@ let server_service listen_host listen_port (ca_public_cert : string) proxy_publi
       >> return None
   | Ok (s , host_inet_addr) ->
   let () = setsockopt s SO_REUSEADDR true in
-  let () = bind s (ADDR_INET (host_inet_addr , listen_port)) in
+  bind s (ADDR_INET (host_inet_addr , listen_port)) >>= fun () ->
   let () = listen s 10 in
   let rec loop s =
     match_lwt

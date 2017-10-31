@@ -175,6 +175,16 @@ The `proxy` only allows access to existing connections etablished in previous se
 
 ### Installation
 
+#### Build
+
+```
+opam install caml4p bitstring lwt rresult x509 cmdliner hex
+opam pin add socks --dev -k git 'https://github.com/cfcs/ocaml-socks#master'
+opam pin add tls --dev -k git 'https://github.com/cfcs/tls#expose_engine_state'
+```
+
+#### Certificates
+
 You will need some X509 certificates, generated using [ocaml-certify](https://github.com/yomimono/ocaml-certify) or some other tool:
 - A CA ("Certificate Authority"); two files: the secret _key_ (which may be kept on offline storage) and the public _certificate_ (which is used by both `client` and `proxy`)
   - `selfsign --ca -k ca.secret.key -c ca.public.certificate my.friends.example.org`
