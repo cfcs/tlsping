@@ -3,30 +3,29 @@
    tlsping uses the "user_id" field in socks4 to hold the hex-encoded
    sha256 fingerprint of the x509 certificate of address:port
 *)
-
 open Lwt
-open Socks4
+open Lwt.Infix
 
 let connect_client (proxy_fd_in   : Lwt_io.input_channel)
                    (proxy_fd_out  : Lwt_io.output_channel)
                     hostname port : bool Lwt.t =
   let message = Socks4.socks_request ~username:"root" hostname port in
-  try_lwt
-  Lwt_io.write proxy_fd_out message >>= fun () ->
-  Lwt_io.read ~count:(1+1+2+4) proxy_fd_in >>= fun result ->
-  (*TODO handle case when fewer than 8 bytes are read *)
-  begin match Socks4.parse_response result with
-  | Ok () ->
-      return true
-  | Error _ ->
-      return false
-  end
-  with
-  | End_of_file -> return false
+  Lwt.catch (fun () ->
+      Lwt_io.write proxy_fd_out message >>= fun () ->
+      Lwt_io.read ~count:(1+1+2+4) proxy_fd_in >>= fun result ->
+      (*TODO handle case when fewer than 8 bytes are read *)
+      begin match Socks4.parse_response result with
+        | Ok () ->
+          return true
+        | Error _ ->
+          return false
+      end)
+    (function
+      | End_of_file -> return false | _ -> failwith "TODOexc224")
 
 let receive_request (client_fd_in : Lwt_io.input_channel) =
   (* read minimum amount of bytes needed*)
-  let rec read_request header =
+  let rec read_request (header:string) =
     begin match Socks4.parse_request header with
     | Error `Incomplete_request ->
       Lwt_io.read ~count:1 client_fd_in

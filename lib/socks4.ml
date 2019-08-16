@@ -1,4 +1,4 @@
-(* SOCKS4 / SOCKS4a 
+(* SOCKS4 / SOCKS4a
 
 http://ftp.icm.edu.pl/packages/socks/socks4/SOCKS4.protocol
 
@@ -43,41 +43,43 @@ let socks_response (success : bool) = String.concat ""
   ]
 
 let parse_request buf =
-  let buf_len = Bytes.length buf in
+  let buf_len = String.length buf in
   if 9 > buf_len
   then R.error `Incomplete_request
   else
-  match buf.[0] , buf.[1], buf.[2], buf.[3] with 
-  | exception Invalid_argument _ -> R.error `Incomplete_request 
-  | '\x04' , '\x01' , (* socks4a CONNECT TODO *) 
-    port_msb, port_lsb (* port *) 
+  match String.(get buf 0, get buf 1, get buf 2, get buf 3) with
+  | exception Invalid_argument _ -> R.error `Incomplete_request
+  | '\x04' , '\x01' , (* socks4a CONNECT TODO *)
+    port_msb, port_lsb (* port *)
     ->
     let username_offset = 8 in
-    begin match Bytes.index_from buf username_offset '\x00' with
+    begin match String.index_from buf username_offset '\x00' with
     | exception Not_found -> (*no user_id / user_id > 255 *)
         if buf_len < username_offset + 256
         then R.error `Incomplete_request
         else R.error `Invalid_request
     | username_end ->
       let port = (int_of_char port_msb lsl 8) + int_of_char port_lsb in
-      let username = Bytes.sub_string buf username_offset (username_end - username_offset) in
-      begin match buf.[4], buf.[5], buf.[6] with
+      let username = String.sub buf username_offset (username_end - username_offset) in
+      begin match String.(get buf 4, get buf 5, get buf 6) with
       | exception Invalid_argument _ ->
           R.error `Incomplete_request
       | '\x00' , '\x00', '\x00' ->
         let address_offset = 1 + username_end in
-        begin match Bytes.index_from buf address_offset '\x00' with
-        | exception Not_found -> (*no domain name / domain name > 255 *) 
+        begin match String.index_from buf address_offset '\x00' with
+        | exception Not_found -> (*no domain name / domain name > 255 *)
             if buf_len < address_offset + 256
             then R.error `Incomplete_request
-            else R.error `Invalid_request 
-        | address_end -> 
-          let address = Bytes.sub_string buf address_offset (address_end - address_offset) in
+            else R.error `Invalid_request
+        | address_end ->
+          let address = String.sub buf address_offset (address_end - address_offset) in
           R.ok @@ `Socks4 { port ; username ; address}
         end
       | _ -> (* address is an IPv4 tuple *)
-        let address = String.concat "." List.(map
-          (fun i -> string_of_int (int_of_char buf.[i])) [ 4; 5; 6; 7 ] )
+        let address = String.concat "."
+            List.(map
+                    (fun i -> string_of_int (int_of_char (String.get buf i)))
+                    [ 4; 5; 6; 7 ] )
         in
         R.ok @@ `Socks4 { port ; username ; address}
       end
@@ -85,18 +87,19 @@ let parse_request buf =
   | _ -> R.error `Invalid_request
 
 let parse_response result =
-  if 8 > Bytes.length result then
+  let open String in
+  if 8 > String.length result then
     R.error `Incomplete_response
   else
-  if   result.[0] = '\x00' 
-    && result.[1] = '\x5a' 
-    (* TODO not checking port *) 
-    && result.[4] = '\x00' 
-    && result.[5] = '\x00' 
-    && result.[6] = '\x00' 
-    && result.[7] = '\xff' 
-  then 
+  if   get result 0 = '\x00'
+    && get result 1 = '\x5a'
+    (* TODO not checking port *)
+    && get result 4 = '\x00'
+    && get result 5 = '\x00'
+    && get result 6 = '\x00'
+    && get result 7 = '\xff'
+  then
     R.ok ()
-  else 
+  else
     R.error `Rejected
 

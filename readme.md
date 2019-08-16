@@ -178,7 +178,7 @@ The `proxy` only allows access to existing connections etablished in previous se
 #### Build
 
 ```
-opam install caml4p bitstring lwt rresult x509 cmdliner hex
+opam install lwt rresult x509 cmdliner hex
 opam pin add socks --dev -k git 'https://github.com/cfcs/ocaml-socks#master'
 opam pin add tls --dev -k git 'https://github.com/cfcs/tls#expose_engine_state'
 ```

@@ -19,5 +19,4 @@ depends: [
   "x509" {>= "0.4.0"}
   "lwt"
   "rresult"
-  "hex"
 ]

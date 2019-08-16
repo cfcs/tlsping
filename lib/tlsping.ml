@@ -1,5 +1,4 @@
 open Rresult
-open Bitstring
 
 type client_operation =
 | Connect   (* connect to a server/port *)
@@ -43,41 +42,61 @@ let opcode_of_server_operation = function
 | Incoming       -> "\x63"
 | Outgoing_ACK   -> "\x64"
 
+let server_operation_of_opcode = function
+  | '\x61' -> Connect_answer
+  | '\x62' -> Status_answer
+  | '\x63' -> Incoming
+  | '\x64' -> Outgoing_ACK
+  | _ -> raise Invalid_opcode
+
 let int64_max a b =
   if  1 = Int64.compare a b then a else b
 
 let int64_min a b =
-  if -1 = Int64.compare a b then a else b 
+  if -1 = Int64.compare a b then a else b
+
+let leX_of_int (type i) ~x ~(shift:i -> int -> int) (v:i) = String.init x
+    (fun i -> char_of_int ((shift v i) land 0xff))
+
+let le8 v = String.make 1 (char_of_int v)
+let le16 v = leX_of_int ~x:2 ~shift:(fun i v -> i lsr v) v
+let le32 v = leX_of_int ~x:4
+    ~shift:(fun i v -> Int32.(shift_right i v |> to_int)) v
+let le64 v = leX_of_int ~x:8
+    ~shift:(fun i v -> Int64.(shift_right i v |> to_int)) v
+let le16len msg = le16 (String.length msg) ^ msg
+let ofle8 ?(off=0) s = int_of_char s.[off]
+let ofle16 ?(off=0) s = (int_of_char s.[off+1] lsl 8) + (int_of_char s.[off+0])
+let ofle32 ?(off=0) s =
+  String.to_seq (String.sub s off 4) |> List.of_seq |> List.fold_left
+    Int32.(fun acc c -> add (shift_left acc 8) (of_int @@ int_of_char c)) 0l
+let ofle64 ?(off=0) s =
+  String.to_seq (String.sub s off 4) |> List.of_seq |> List.fold_left
+    Int32.(fun acc c -> add (shift_left acc 8) (of_int @@ int_of_char c)) 0l
+
 
 let c_prepend_length_and_opcode opcode msg =
-  let msg = string_of_bitstring msg in
-  BITSTRING {
-    1 + String.length msg : 16 : int, bigendian, unsigned
-  ; opcode_of_client_operation opcode : 8 : string
-  ; msg : -1 : string
-  } |> string_of_bitstring
+  let len = 1 + String.length msg in
+  let op = opcode_of_client_operation opcode in
+  (le16 len) ^ op ^ msg
 
 let serialize_connect ping_interval (address, port) : string option =
-  try Some (BITSTRING
-  { ping_interval                      : 16 : int, bigendian
-  ; port                               : 16 : int, bigendian
-  ; address : (8 * String.length address)   : string
-  } |> c_prepend_length_and_opcode Connect)
-  with
-  | Bitstring.Construct_failure _ -> None
+  Some ((le16 ping_interval
+         ^ le16 port
+         ^ address)
+        |> c_prepend_length_and_opcode Connect)
 
 let serialize_outgoing conn_id seq_num msg =
   (* right now we only send one message *)
-  BITSTRING
-  { conn_id : 32 : int, unsigned, bigendian
-  ; seq_num : 64 : int, unsigned, bigendian (* seq_num offset *)
-  ; 1       : 16 : int, unsigned, bigendian (* record count *)
-  ; msg     : -1 : string
-  } |> c_prepend_length_and_opcode Outgoing
+  (le32 conn_id
+  ^le64 seq_num (* seq_num offset *)
+  ^le16 1 (* record count *)
+  ^msg
+ ) |> c_prepend_length_and_opcode Outgoing
 
 let serialize_queue ~conn_id seq_num (msgs : string list) : string list =
-  (** splits a list of PINGs into a number of serialized QUEUE
-   *  messages, wrapping at 65535 bytes**)
+  (* splits a list of PINGs into a number of serialized QUEUE
+   * messages, wrapping at 65535 bytes**)
   let fst a  = let (t , _, _, _) = a in t in
   let snd a  = let (_ , t, _, _) = a in t in
   let thrd a = let (_ , _, t, _) = a in t in
@@ -89,11 +108,7 @@ let serialize_queue ~conn_id seq_num (msgs : string list) : string list =
   ( fun msg -> function
     | (acc_hd :: acc_tl) ->
     let acc_len = fst acc_hd in
-    let msg =
-      (BITSTRING
-      { String.length msg : 16 : int, unsigned, bigendian
-      ; msg : -1 : string } |> string_of_bitstring)
-    in
+    let msg = le16len msg in
     let msg_len = String.(length msg) in
     (* check if the msg + (32+64)/8=12 (conn_id and seq_num offset)
      * -(16+8)/8=3 (length and opcode) will overflow the 16 bit length
@@ -112,10 +127,10 @@ let serialize_queue ~conn_id seq_num (msgs : string list) : string list =
   in
   List.(fold_right
   (fun lst -> fun acc ->
-     ((BITSTRING
-      { conn_id  : 32 : int, unsigned, bigendian
-      ; thrd lst : 64 : int, unsigned, bigendian
-      ; String.concat "" (snd lst) : -1 : string}
+     ((
+       le32 conn_id
+       ^ le64 (thrd lst)
+       ^ String.concat "" (snd lst)
      ) |> c_prepend_length_and_opcode Queue)
      :: acc
   ) msgs [])
@@ -123,17 +138,15 @@ let serialize_queue ~conn_id seq_num (msgs : string list) : string list =
 (*TODO serialize_incoming_ack *)
 
 let serialize_status first_conn_id last_conn_id =
-  BITSTRING
-  { first_conn_id : 32 : int, unsigned, bigendian
-  ; last_conn_id  : 32 : int, unsigned, bigendian
-  } |> c_prepend_length_and_opcode Status
+  (le32 first_conn_id
+   ^ le32 last_conn_id
+  ) |> c_prepend_length_and_opcode Status
 
 (*TODO serialize_fetch *)
 
 let serialize_subscribe conn_id =
-  BITSTRING
-  { conn_id : 32 : int, unsigned, bigendian
-  } |> c_prepend_length_and_opcode Subscribe
+  le32 conn_id
+  |> c_prepend_length_and_opcode Subscribe
 
 type connection_status =
   { conn_id : int32
@@ -145,43 +158,43 @@ type connection_status =
   }
 
 let s_prepend_length_and_opcode opcode msg =
-  let msg = string_of_bitstring msg in
-  BITSTRING {
-    1 + String.length msg             : 16 : int, bigendian, unsigned
-  ; opcode_of_server_operation opcode :  8 : string
-  ; msg : -1 : string
-  } |> string_of_bitstring
+  le16 (1 + String.length msg)
+  ^ opcode_of_server_operation opcode
+  ^ msg
 
 let serialize_status_answer connections =
-  let rec serialize (acc : bytes list) = function
-  | { conn_id ; ping_interval ; address ; port ; seq_num ; queue_length } :: tl ->
-      serialize (string_of_bitstring (BITSTRING
-      { conn_id       : 32 : int, unsigned, bigendian
-      ; ping_interval : 16 : int, unsigned, bigendian
-      ; port          : 16 : int, unsigned, bigendian
-      ; String.length address :  8 : int, unsigned, bigendian
-      ; address       : -1 : string
-      ; seq_num       : 64 : int, unsigned, bigendian
-      ; queue_length  : 32 : int, unsigned, bigendian (* amount of PINGs queued *)
-      }) :: acc) tl
-  | [] -> Bytes.concat "" acc
-          |> bitstring_of_string |> s_prepend_length_and_opcode Status_answer
+  let rec serialize (acc : string list) = function
+    | { conn_id ; ping_interval ; address ; port ; seq_num ;
+        queue_length } :: tl ->
+      serialize ((
+          String.concat "" [
+            le32 conn_id
+          ; le16 ping_interval
+          ; le16 port
+          ; le8 (String.length address)
+          ; address
+          ; le64 seq_num
+          ; le32 queue_length (* amount of PINGs queued *)
+          ]
+        ) :: acc) tl
+    | [] -> String.concat "" acc
+            |> s_prepend_length_and_opcode Status_answer
   in serialize [] connections
 
 let serialize_incoming conn_id next_seq_num queued_seq_num msg =
-  BITSTRING {
-     conn_id        : 32 : int, unsigned, bigendian
-  ;  next_seq_num   : 64 : int, unsigned, bigendian
-  ;  queued_seq_num : 64 : int, unsigned, bigendian
-  ;  msg : -1 : string
-  } |> s_prepend_length_and_opcode Incoming
+ String.concat "" [
+   le32 conn_id
+  ; le64 next_seq_num
+  ; le64 queued_seq_num
+  ; msg
+  ] |> s_prepend_length_and_opcode Incoming
 
 let serialize_connect_answer conn_id address port =
-  BITSTRING
-  { conn_id  : 32 : int, unsigned, bigendian
-  ; port     : 16 : int, unsigned, bigendian
-  ; address  : -1 : string
-  } |> s_prepend_length_and_opcode Connect_answer
+  String.concat "" [
+    le32 conn_id
+  ; le16 port
+  ; address
+  ] |> s_prepend_length_and_opcode Connect_answer
 
 let serialize_outgoing_ack (conn_id : int32) status seq_num next_seq_num =
   let status =
@@ -189,21 +202,21 @@ let serialize_outgoing_ack (conn_id : int32) status seq_num next_seq_num =
     | `Ok     -> 0
     | `Resend -> 1
   in
-  BITSTRING
-  { conn_id      : 32 : int, unsigned, bigendian
-  ; status       :  8 : int, unsigned, bigendian
-  ; seq_num      : 64 : int, unsigned, bigendian
-  ; next_seq_num : 64 : int, unsigned, bigendian
-  } |> s_prepend_length_and_opcode Outgoing_ACK
+  String.concat ""
+  [ le32 conn_id
+  ; le8 status
+  ; le64 seq_num
+  ; le64 next_seq_num
+  ] |> s_prepend_length_and_opcode Outgoing_ACK
 
 let read_msg_len msg =
   let msg_len = String.length msg in
   if 2 > msg_len then `Need_more (2 - msg_len)
   else
-  let length , payload, payload_len =
-    (bitmatch bitstring_of_string msg with
-    { length  : 16 : int, bigendian
-    ; payload : -1 : bitstring } -> length , payload, bitstring_length payload / 8)
+    let length , payload, payload_len =
+      let payload = String.sub msg 2 (String.length msg - 2) in
+      (int_of_char msg.[1] lsl 8) + (int_of_char msg.[0]),
+      payload, String.length payload
   in
   if length > payload_len
   then `Need_more (length - payload_len)
@@ -218,131 +231,128 @@ let unserialized_of_client_msg msg =
   | (`Need_more _ | `Invalid _) as ret -> ret
   | `Payload payload ->
   (* we have the bytes we need, attempt to parse them *)
-  bitmatch payload with
+    match operation_of_opcode payload.[0] with
+    | Connect ->
+      let ping_interval = ofle16 ~off:1 payload in
+      let port = ofle16 ~off:3 payload in
+      let address = String.sub payload 5 (String.length payload -5) in
+      `Connect (ping_interval, address, port)
 
-  | { opcode        :  8 : string,
-        check(opcode = opcode_of_client_operation Connect)
-    ; ping_interval : 16 : int, unsigned, bigendian
-    ; port          : 16 : int, unsigned, bigendian
-    ; address       : -1 : string
-    } -> `Connect (ping_interval, address, port)
+    | Outgoing ->
+      let conn_id = ofle32 ~off:1 payload in
+      assert (conn_id <> 0l);
+      let seq_num = ofle64 ~off:5 payload in
+      let count =
+        ofle16 ~off:(1+4+8) payload in (* amount of TLS records in msg *)
+      let msg = String.sub payload (1+4+8+2) (String.length payload -1-4-8-2) in
+      `Outgoing (conn_id , seq_num , count , msg)
 
-  | { opcode  :  8 : string,
-        check(opcode = opcode_of_client_operation Outgoing)
-    ; conn_id : 32 : int, unsigned, bigendian, check(conn_id <> 0l)
-    ; seq_num : 64 : int, unsigned, bigendian
-    ; count   : 16 : int, unsigned, bigendian (* amount of TLS records in msg *)
-    ; msg     : -1 : string
-    } -> `Outgoing (conn_id , seq_num , count , msg)
-
-  | { opcode  :  8 : string,
-        check(opcode = opcode_of_client_operation Queue)
-    ; conn_id : 32 : int, unsigned, bigendian, check(conn_id <> 0l)
-    ; seq_num : 64 : int, unsigned, bigendian
-    ; msgs    : -1 : bitstring
-    } ->
-      let rec unpack_msgs acc msgs = (
-        bitmatch msgs with
-        | { len :  16 : int, unsigned, bigendian, check(len <> 0), bind(len*8)
-          ; msg : len : string
-          ; tl  :  -1 : bitstring
-          } -> unpack_msgs (msg :: acc) tl
-        | { _ } as x when 0 = bitstring_length x ->
-            `Queue (conn_id , seq_num , acc) (*TODO tag each?*)
-        | { _ } ->
-            `Invalid `Invalid_packet
-      )in
-      unpack_msgs [] msgs
+  | Queue ->
+    let conn_id = ofle32 ~off:1 payload in
+    assert (conn_id <> 0l);
+    let seq_num = ofle64 ~off:(1+4) payload in
+    let rec unpack_msgs acc msgs = (
+      match msgs with
+      | "" -> `Queue (conn_id , seq_num , acc) (*TODO tag each?*)
+      | _ ->
+      try begin let len = ofle16 msgs in
+      assert (len <> 0);
+      let msg = String.sub msgs 2 len in
+      let tl = String.sub msgs (2+len) (String.length msgs-2-len) in
+      unpack_msgs (msg :: acc) tl
+      end
+      with
+      | _ -> `Invalid `Invalid_packet
+    ) in
+    let msgs = String.sub payload (1+4+8) (String.length payload-1-4-8) in
+    unpack_msgs [] msgs
 
   (*TODO handle Incoming_ack *)
 
-  | { opcode : 8 : string,
-        check(opcode = opcode_of_client_operation Status)
-    ; first_conn_id : 32 : int, unsigned, bigendian
-    ; last_conn_id  : 32 : int, unsigned, bigendian, check(first_conn_id <= last_conn_id)
-    } -> `Status (first_conn_id , last_conn_id)
+  | Status ->
+    let first_conn_id = ofle32 ~off:1 payload in
+    let last_conn_id = ofle32 ~off:(1+4) payload in
+    assert (first_conn_id <= last_conn_id);
+    `Status (first_conn_id , last_conn_id)
 
   (*TODO handle fetch *)
 
-  | { opcode  :  8 : string,
-        check(opcode = opcode_of_client_operation Subscribe)
-    ; conn_id : 32 : int, unsigned, bigendian, check(conn_id <> 0l)
-    } -> `Subscribe conn_id
+  | Subscribe ->
+    let  conn_id = ofle32 ~off:1 payload in
+    assert (conn_id <> 0l);
+    `Subscribe conn_id
 
   (* TODO handle more opcodes *)
-  | { _ } -> `Invalid `Invalid_packet
+  | _ -> `Invalid `Invalid_packet
 
 let unserialized_of_server_msg msg =
   (* parses CONNECT_ANSWER ; INCOMING ; STATUS_ANSWER *)
   match read_msg_len msg with
   | (`Need_more _ | `Invalid _) as ret -> ret
   | `Payload payload ->
-  bitmatch payload with
+  try (match server_operation_of_opcode payload.[0] with
+  | Connect_answer ->
+    let conn_id = ofle32 ~off:1 payload in
+    let port = ofle16 ~off:(1+4) payload in
+    let address = String.sub payload (1+4+2) (String.length payload-1-4-2) in
+    `Connect_answer (conn_id , address, port)
 
-  | { opcode   :  8 : string,
-        check(opcode = opcode_of_server_operation Connect_answer)
-    ; conn_id  : 32 : int, unsigned, bigendian
-    ; port     : 16 : int, unsigned, bigendian
-    ; address  : -1 : string
-    } -> `Connect_answer (conn_id , address, port)
+  | Incoming ->
+    let conn_id = ofle32 ~off:1 payload in
+    let next_seq_num = ofle64 ~off:(1+4) payload in
+    let queued_seq_num = ofle64 ~off:(1+4+8) payload in
+    let msg = String.sub payload (1+4+8+8) (String.length payload -1-4-8-8) in
+    `Incoming (conn_id , next_seq_num , queued_seq_num , msg)
 
-  | { opcode :  8 : string,
-        check(opcode = opcode_of_server_operation Incoming)
-    ; conn_id        : 32 : int, unsigned, bigendian
-    ; next_seq_num   : 64 : int, unsigned, bigendian
-    ; queued_seq_num : 64 : int, unsigned, bigendian
-    ; msg    : -1 : string
-    } -> `Incoming (conn_id , next_seq_num , queued_seq_num , msg)
-
-  | { opcode   :  8 : string,
-        check(opcode = opcode_of_server_operation Outgoing_ACK)
-    ; conn_id  : 32 : int, unsigned, bigendian, check(conn_id <> 0l)
-    ; status   :  8 : int, unsigned, bigendian,
-        check(0 <= status && status <= 1)
-    ; seq      : 64 : int, unsigned, bigendian
-    ; next_seq : 64 : int, unsigned, bigendian
-    } ->
-      let status =
-        begin match status with
+  | Outgoing_ACK ->
+    let conn_id = ofle32 ~off:1 payload in
+    assert (conn_id <> 0l);
+    let status = ofle8 ~off:(1+4) payload in
+    assert (0 <= status && status <= 1);
+    let seq = ofle64 ~off:(1+4+1) payload in
+    let next_seq = ofle64 ~off:(1+4+1+8) payload in
+    let status =
+      begin match status with
         | 0 -> `Ok
         | 1 -> `Resend
         | _ -> failwith "TODO should never happen" end
-      in `Outgoing_ACK (conn_id , status , seq , next_seq)
+    in `Outgoing_ACK (conn_id , status , seq , next_seq)
 
-  | { opcode :  8 : string,
-        check(opcode = opcode_of_server_operation Status_answer)
-    ; tuples : -1 : bitstring
-    } ->
-      let rec parse_tuples tuples acc =
-        if 0 = Bitstring.bitstring_length tuples then
-          `Status_answer acc
-        else
-        (bitmatch tuples with
-        | { conn_id       : 32 : int, unsigned, bigendian
-          ; ping_interval : 16 : int, unsigned, bigendian (* in seconds *)
-          ; port          : 16 : int, unsigned, bigendian
-          ; addr_len      :  8 : int, unsigned, bigendian, bind(addr_len * 8)
-          ; address       : addr_len : string
-          ; seq_num       : 64 : int, unsigned, bigendian (* next write seq_num expected by the destination *)
-          ; count_queued  : 32 : int, unsigned, bigendian (* amount of PINGs queued *)
-          ; tail          : -1 : bitstring
-          } ->
-                parse_tuples
-                (tail)
-             @@ (conn_id , ping_interval, address, port, seq_num, count_queued) :: acc
-        | { _ } -> `Invalid `Invalid_status_answer
-        )
+  | Status_answer ->
+    let rec parse_tuples tuples acc =
+      if 0 = String.length tuples then
+        `Status_answer acc
+      else
+        try (
+          let conn_id = ofle32 tuples in
+          let ping_interval = ofle16 ~off:4 tuples in (* in seconds *)
+          let port = ofle16 ~off:6 tuples in
+          let addr_len = ofle8 ~off:8 tuples in
+          let address = String.sub tuples 9 (addr_len) in
+          let seq_num = ofle64 ~off:(9+addr_len) tuples in
+          (* next write seq_num expected by the destination *)
+
+          let count_queued = ofle32 ~off:(9+addr_len+8) tuples in
+          (* amount of PINGs queued *)
+          let tail = String.sub tuples (9+addr_len+8+4)
+              (String.length tuples-9-addr_len-8-4) in
+          parse_tuples
+            (tail)
+          @@ (conn_id , ping_interval, address, port,
+              seq_num, count_queued) :: acc
+        ) with
+        | _ -> `Invalid `Invalid_status_answer
       in
-      parse_tuples tuples []
+      parse_tuples (String.sub payload 1 (String.length payload-1)) []
 
-  | { _ } -> `Invalid `Invalid_packet
+  ) with | _ -> `Invalid `Invalid_packet
 
 let create_socket host =
   let open Lwt in
   let open Lwt_unix in
   (* TODO handle try gethostbyname with | Not_found *)
   Lwt_unix.gethostbyname host >>= fun host_entry ->
-  if 0 = Array.length host_entry.h_addr_list then
+  if [| |] = host_entry.h_addr_list then
     return @@ R.error ()
   else
     let host_inet_addr = host_entry.h_addr_list.(0) in
@@ -350,7 +360,7 @@ let create_socket host =
     return @@ R.ok (s , host_inet_addr)
 
 type tls_config = {
-  authenticator : X509.Authenticator.a
+  authenticator : X509.Authenticator.t
 ; ciphers : Tls.Ciphersuite.ciphersuite list
 ; version : Tls.Core.tls_version * Tls.Core.tls_version
 ; hashes  : Nocrypto.Hash.hash list
@@ -360,7 +370,8 @@ type tls_config = {
 let tls_config (ca_public_cert , public_cert , secret_key) =
   let open Lwt in
   X509_lwt.authenticator (`Ca_file ca_public_cert) >>= fun authenticator ->
-  X509_lwt.private_of_pems ~cert:public_cert ~priv_key:secret_key >>= fun cert ->
+  X509_lwt.private_of_pems ~cert:public_cert
+    ~priv_key:secret_key >>= fun cert ->
   return {
     authenticator
   ; ciphers = [`TLS_DHE_RSA_WITH_AES_256_CBC_SHA256]
@@ -368,4 +379,3 @@ let tls_config (ca_public_cert , public_cert , secret_key) =
   ; hashes  = [`SHA256]
   ; certificates = (`Single cert)
   }
-
