@@ -56,7 +56,7 @@ let int64_min a b =
   if -1 = Int64.compare a b then a else b
 
 let leX_of_int (type i) ~x ~(shift:i -> int -> int) (v:i) = String.init x
-    (fun i -> char_of_int ((shift v i) land 0xff))
+    (fun i -> char_of_int ((shift v (i*8)) land 0xff))
 
 let le8 v = String.make 1 (char_of_int v)
 let le16 v = leX_of_int ~x:2 ~shift:(fun i v -> i lsr v) v
@@ -68,11 +68,13 @@ let le16len msg = le16 (String.length msg) ^ msg
 let ofle8 ?(off=0) s = int_of_char s.[off]
 let ofle16 ?(off=0) s = (int_of_char s.[off+1] lsl 8) + (int_of_char s.[off+0])
 let ofle32 ?(off=0) s =
-  String.to_seq (String.sub s off 4) |> List.of_seq |> List.fold_left
+  String.to_seq (String.sub s off 4) |> List.of_seq |> List.rev
+  |> List.fold_left
     Int32.(fun acc c -> add (shift_left acc 8) (of_int @@ int_of_char c)) 0l
 let ofle64 ?(off=0) s =
-  String.to_seq (String.sub s off 4) |> List.of_seq |> List.fold_left
-    Int32.(fun acc c -> add (shift_left acc 8) (of_int @@ int_of_char c)) 0l
+  String.to_seq (String.sub s off 4) |> List.of_seq |> List.rev
+  |> List.fold_left
+    Int64.(fun acc c -> add (shift_left acc 8) (of_int @@ int_of_char c)) 0L
 
 
 let c_prepend_length_and_opcode opcode msg =
@@ -138,6 +140,8 @@ let serialize_queue ~conn_id seq_num (msgs : string list) : string list =
 (*TODO serialize_incoming_ack *)
 
 let serialize_status first_conn_id last_conn_id =
+  Logs.debug (fun m -> m "%s first_conn_id:%ld last_conn_id:%ld"
+                 __LOC__ first_conn_id last_conn_id);
   (le32 first_conn_id
    ^ le32 last_conn_id
   ) |> c_prepend_length_and_opcode Status
@@ -272,6 +276,9 @@ let unserialized_of_client_msg msg =
   | Status ->
     let first_conn_id = ofle32 ~off:1 payload in
     let last_conn_id = ofle32 ~off:(1+4) payload in
+    if first_conn_id > last_conn_id then
+      Logs.err (fun m -> m "first_conn_id:%ld last_conn_id:%ld"
+                  first_conn_id last_conn_id);
     assert (first_conn_id <= last_conn_id);
     `Status (first_conn_id , last_conn_id)
 

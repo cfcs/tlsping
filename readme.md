@@ -180,33 +180,38 @@ The `proxy` only allows access to existing connections etablished in previous se
 ```
 opam install lwt rresult x509 cmdliner hex
 opam pin add socks --dev -k git 'https://github.com/cfcs/ocaml-socks#master'
-opam pin add tls --dev -k git 'https://github.com/cfcs/tls#expose_engine_state'
+opam pin add nocrypto --dev -k git 'https://github.com/mirleft/ocaml-nocrypto#master'
+opam pin add tls --dev -k git 'https://github.com/cfcs/ocaml-tls#expose_engine_state'
 ```
 
 #### Certificates
 
-You will need some X509 certificates, generated using [ocaml-certify](https://github.com/yomimono/ocaml-certify) or some other tool:
-- A CA ("Certificate Authority"); two files: the secret _key_ (which may be kept on offline storage) and the public _certificate_ (which is used by both `client` and `proxy`)
-  - `selfsign --ca -k ca.secret.key -c ca.public.certificate my.friends.example.org`
+You will need some X509 certificates,
+generated using
+[ocaml-certify](https://github.com/yomimono/ocaml-certify) or some other tool:
+- A CA ("Certificate Authority");
+  two files: the secret _key_ (which may be kept on offline storage)
+  and the public _certificate_ (which is used by both `client` and `proxy`)
+  - `certify selfsign --ca -k ca.secret.key -c ca.public.certificate my.friends.example.org`
 
 - The client will need the CA `ca.public.certificate` (but **not** the _key_)
   - It will also need a client _certificate_ signed by the CA, and the _key_ the corresponds to this client _certificate_
     - The client makes a CSR (Certificate Signing Request):
 
-      `csr --out client.csr -k client.secret.key client.example.org "A friend of ours"`
+      `certify csr --out client.csr -k client.secret.key client.example.org "A friend of ours"`
     - The client transfers this CSR file to the CA which signs it:
 
-      `sign --client --cain ca.public.certificate --key ca.secret.key --csrin client.csr --out client.public.certificate`
+      `certify sign --client --cain ca.public.certificate --key ca.secret.key --csrin client.csr --out client.public.certificate`
 
 - The proxy will need the CA _certificate_ (but **not** the _key_)
   - It will also need a server _certificate_ signed by the CA, and the _key_ that corresponds to this server _certificate_
   - The proxy makes a CSR (Certificate Signing Request):
 
-    `csr --out proxy.csr -k proxy.secret.key proxy.example.org "One of our proxies"`
+    `certify csr --out proxy.csr -k proxy.secret.key proxy.example.org "One of our proxies"`
 
   - The proxy transfers this CSR file to the CA which signs it:
 
-    `sign --cain ca.public.certificate --key ca.secret.key --csrin proxy.csr --out proxy.public.certificate`
+    `certify sign --cain ca.public.certificate --key ca.secret.key --csrin proxy.csr --out proxy.public.certificate`
 
 - The CA transfers the resulting certificates to the respective key holders
 

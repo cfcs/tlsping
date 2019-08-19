@@ -3,4 +3,7 @@ PKG tls
 PKG cstruct
 PKG lwt
 PKG lwt.unix
-S lib/
+PKG hex
+PKG fmt
+PKG logs
+S lib

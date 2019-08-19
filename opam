@@ -5,7 +5,7 @@ dev-repo:     "https://github.com/cfcs/tlsping.git"
 bug-reports:  "https://github.com/cfcs/tlsping/issues"
 author:       ["Luther Blissett"]
 maintainer:   ["Luther Blissett"]
-license:      "proprietary"
+license:      "ISC"
 
 build: [
   [ "ocaml" "pkg/git.ml" ]
@@ -14,9 +14,10 @@ build: [
 ]
 depends: [
   "ocamlfind"
-  "tls" {>= "0.6.0"}
-  "nocrypto" {>= "0.5.0"}
-  "x509" {>= "0.4.0"}
-  "lwt"
-  "rresult"
+  "tls" {>= "0.10.4"}
+  "nocrypto" {>= "0.5.4"}
+  "x509" {>= "0.7.0"}
+  "lwt" {>= "4.2.1"}
+  "rresult" {>= "0.6.0"}
+  "hex" {>= "1.4.0"}
 ]
