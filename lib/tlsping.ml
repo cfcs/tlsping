@@ -49,6 +49,21 @@ let server_operation_of_opcode = function
   | '\x64' -> Outgoing_ACK
   | _ -> raise Invalid_opcode
 
+type status_answer =
+  { conn_id : int32 ;
+    ping_interval: int ;
+    port : int ;
+    address : string ;
+    seq_num : int64 ;
+    count_queued : int32 ;
+  }
+
+let pp_status_answer ppf v =
+  Fmt.pf ppf "@[<v>conn_id: %ld@ ping_interval: %d@ address:%S@ port:%d@ \
+              seq_num:%a@ count_queued:%ld@]"
+    v.conn_id v.ping_interval v.address v.port
+    (Fmt.styled `Yellow Fmt.int64) v.seq_num v.count_queued
+
 let int64_max a b =
   if  1 = Int64.compare a b then a else b
 
@@ -186,6 +201,9 @@ let serialize_status_answer connections =
   in serialize [] connections
 
 let serialize_incoming conn_id next_seq_num queued_seq_num msg =
+  Logs.debug (fun m ->
+      m "serializing incoming conn:%ld next_seq:%Ld queued_seq:%Ld msg:..."
+        conn_id next_seq_num queued_seq_num);
  String.concat "" [
    le32 conn_id
   ; le64 next_seq_num
@@ -201,6 +219,11 @@ let serialize_connect_answer conn_id address port =
   ] |> s_prepend_length_and_opcode Connect_answer
 
 let serialize_outgoing_ack (conn_id : int32) status seq_num next_seq_num =
+  Logs.debug (fun m ->
+      m "serializing outgoing ack: %s conn_id:%ld \
+         seq_num:%Ld next_seq_num:%Ld"
+        (match status with `Ok -> "Ok" | `Resend -> "Resend")
+        conn_id seq_num next_seq_num) ;
   let status =
     match status with
     | `Ok     -> 0
@@ -328,7 +351,7 @@ let unserialized_of_server_msg msg =
   | Status_answer ->
     let rec parse_tuples tuples acc =
       if 0 = String.length tuples then
-        `Status_answer acc
+        `Status_answer (acc:status_answer list)
       else
         try (
           let conn_id = ofle32 tuples in
@@ -345,14 +368,39 @@ let unserialized_of_server_msg msg =
               (String.length tuples-9-addr_len-8-4) in
           parse_tuples
             (tail)
-          @@ (conn_id , ping_interval, address, port,
-              seq_num, count_queued) :: acc
+          @@ {conn_id ; ping_interval ; address ; port ;
+              seq_num ; count_queued} :: acc
         ) with
         | _ -> `Invalid `Invalid_status_answer
       in
       parse_tuples (String.sub payload 1 (String.length payload-1)) []
 
   ) with | _ -> `Invalid `Invalid_packet
+
+let pp_server_message ppf v : unit =
+  let fmt_typ ppf v = Fmt.(styled `Cyan (styled `Underline string)) ppf v in
+  match v with
+  | `Outgoing_ACK (conn_id, `Resend, seq, seq2) ->
+    Fmt.pf ppf "@[<v>[% 4ld] %a %Ld -> %Ld@]"
+      conn_id fmt_typ "NACK_Resend" seq seq2
+  | `Outgoing_ACK (conn_id, `Ok, seq, seq2) ->
+    Fmt.pf ppf "@[<v>[% 4ld] %a %Ld -> %Ld@]"
+      conn_id fmt_typ "ACK" seq seq2
+  | `Incoming (conn_id, next_seq, queued_seq_num, msg) ->
+    Fmt.pf ppf "@[<v>[% 4ld] %a :%Ld  #%Ld Encrypted_bytes:%d@]"
+      conn_id fmt_typ "Incoming" next_seq queued_seq_num
+      (String.length msg)
+  | `Status_answer (lst:status_answer list) ->
+    Fmt.pf ppf "@[<v>%a @[<v>%a@]@]"
+      fmt_typ "Status_answer"
+      Fmt.(list ~sep:cut pp_status_answer) lst
+  | `Connect_answer (conn_id , address, port) ->
+    Fmt.pf ppf "@[<v>[% 4ld] %a %S:%d@]"
+      conn_id fmt_typ "Connect_answer" address port
+  | `Invalid _ ->
+    Fmt.pf ppf "@[<v>%a@]"
+      (Fmt.styled_unit `Red "Invalid message from server") ()
+  | `Need_more _ -> ()
 
 let create_socket host =
   let open Lwt in

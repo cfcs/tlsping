@@ -15,7 +15,7 @@ type connection =
   ; outgoing  : (int64 * string) Queue.t
   }
 
-let connections = Hashtbl.create 10
+let connections : (int32, connection) Hashtbl.t = Hashtbl.create 10
 
 let connection_status_of_connection conn_id (conn:connection)
     :Tlsping.connection_status =
@@ -44,7 +44,7 @@ let handle_incoming conn_id ic incoming incoming_condition outgoing () =
       Queue.fold (fun (next , max) -> fun (seq,_) ->
         (int64_min seq next , int64_max seq max)
       )
-      (Int64.max_int , 0L) outgoing
+      (0L, 0L) outgoing
     in
     Logs.debug (fun m ->
         m "handle_incoming: %d bytes read nextq: %Ld queued: %Ld"
@@ -86,41 +86,43 @@ let handle_subscribe condition_input_available queue oc () =
 let handle_interval conn_id () =
   let rec send_pong () =
     begin match Hashtbl.find connections conn_id with
-    | exception Not_found -> (*TODO die*)
-      Logs.err (fun m -> m "handle_interval: shutting down loop") ;
-      Lwt.return_unit
-    | (x:connection) ->
-    let now = Unix.time () in
-    begin match x.last_output_time +. (float_of_int x.interval) > now with
-    | true ->
-      return ()
-    | false ->
-      let rec get_pong () =
-        begin match Queue.pop x.outgoing with
-          | (s , msg) when s = x.seq_num -> s , msg
-          | (_ , _) (*when discard < x.seq_num*) -> get_pong ()
-          | exception Queue.Empty ->
-            x.seq_num , "" (* give up TODO kill connection *)
+      | exception Not_found -> (*TODO die*)
+        Logs.err (fun m -> m "handle_interval: shutting down loop") ;
+        Lwt.return_unit
+      | (x:connection) ->
+        let now = Unix.time () in
+        begin match x.last_output_time +. (float_of_int x.interval) > now with
+          | true ->
+            Lwt_unix.sleep 1.0 >>= fun () -> send_pong ()
+          | false ->
+            let rec get_pong () =
+              begin match Queue.pop x.outgoing with
+                | (s , msg) when s = x.seq_num -> s , msg
+                | (_ , _) (*when discard < x.seq_num*) -> get_pong ()
+                | exception Queue.Empty ->
+                  x.seq_num , "" (* give up TODO kill connection *)
+              end
+            in
+            begin match get_pong () with
+              | _ , "" | 0L , _ ->
+                Logs.warn (fun m ->
+                    m "UNABLE TO SEND PING FOR %s:%d, TODO kill connection"
+                      x.address x.port) ;
+                Hashtbl.remove connections conn_id ;
+                Lwt_io.close x.ic >>= fun () ->
+                Lwt_io.close x.oc
+              | seq_num , msg ->
+                Logs.warn (fun m ->
+                    m "SENDING PING %Ld -> %Ld (remaining: %d)"
+                      x.seq_num seq_num Queue.(length x.outgoing)) ;
+                Hashtbl.replace connections conn_id
+                  {x with
+                   seq_num = Int64.succ x.seq_num
+                 ; last_output_time = now } ;
+                Lwt_io.write x.oc msg >>= fun () ->
+                Lwt_unix.sleep 1.0 >>= send_pong
+            end
         end
-      in
-      begin match get_pong () with
-        | _ , "" | 0L , _ ->
-          Logs.warn (fun m ->
-              m "UNABLE TO SEND PING FOR %s:%d, TODO kill connection"
-                x.address x.port) ;
-          Lwt.return_unit
-        | seq_num , msg ->
-          Logs.warn (fun m ->
-              m "SENDING PING %Ld -> %Ld (remaining: %d)"
-                x.seq_num seq_num Queue.(length x.outgoing)) ;
-          Hashtbl.replace connections conn_id
-            {x with
-              seq_num = Int64.succ x.seq_num
-            ; last_output_time = now } ;
-          Lwt_io.write x.oc msg
-      end
-    end
-    >>= fun () -> Lwt_unix.sleep 1.0 >>= fun () -> send_pong ()
     end
   in
   send_pong ()
@@ -143,7 +145,8 @@ let cmd_connect tls_state client_oc (`Connect (interval , address , port)) =
                 f_n address port) ; Lwt.return_unit
         | _ -> failwith ("exception in " ^ __LOC__)
       ) >>= fun () ->
-    let id = 1 +  Hashtbl.length connections in (*TODO proper counter *)
+    let id = Int32.(add 1l (*TODO proper counter *)
+                    @@ of_int @@ Hashtbl.length connections) in
     let us = { (* TODO tie this to the TLS client cert *)
       interval
     (* TODO interval http://ocsigen.org/lwt/2.5.0/api/Lwt_timeout *)
@@ -161,11 +164,10 @@ let cmd_connect tls_state client_oc (`Connect (interval , address , port)) =
     in
     Hashtbl.add connections id us ;
     (* Start a separate thread to save incoming data: *)
-    Lwt_io.write client_oc (serialize_connect_answer Int32.(of_int id)
-                              address port)
+    Lwt_io.write client_oc (serialize_connect_answer id address port)
     >>= fun () ->
     Lwt.async (handle_subscribe us.incoming_condition us.incoming client_oc ) ;
-    Lwt.async (handle_incoming Int32.(of_int id) us.ic
+    Lwt.async (handle_incoming id us.ic
                  us.incoming us.incoming_condition us.outgoing) ;
   Lwt.async (handle_interval id) ;
   return ()
@@ -195,7 +197,12 @@ let handle_server (tls_state , (ic, (oc : Lwt_io.output_channel))) () =
                 needed_len) ;
           loop needed_len msg
         | `Subscribe conn_id ->
-          let x = Hashtbl.find connections Int32.(to_int conn_id) in
+          match Hashtbl.find connections conn_id with
+          | exception Not_found ->
+            Logs.err (fun m -> m "Subscribe to nonregistered conn_id %ld"
+                         conn_id);
+            Lwt.return_unit
+          | x ->
           if owner_fp_of_state tls_state = x.owner_fp then
             (Lwt.async (handle_subscribe x.incoming_condition x.incoming oc) ;
              loop 2 "")
@@ -214,7 +221,7 @@ let handle_server (tls_state , (ic, (oc : Lwt_io.output_channel))) () =
                          first_conn_id last_conn_id) ;
           let conn_statuses = Hashtbl.fold
               (fun conn_id -> fun conn -> fun acc ->
-                 connection_status_of_connection Int32.(of_int conn_id) conn
+                 connection_status_of_connection conn_id conn
                  :: acc )
               connections [] |> List.rev
           in
@@ -225,7 +232,6 @@ let handle_server (tls_state , (ic, (oc : Lwt_io.output_channel))) () =
               m "OUTGOING for conn %ld seq %Ld count %d msg: %s"
                 conn_id pkt_seq_num count
                 (begin match Hex.of_string msg with `Hex s->s end));
-          let conn_id = Int32.to_int conn_id in
           let (x:connection) = Hashtbl.find connections conn_id in
           begin match pkt_seq_num , Int64.(sub pkt_seq_num x.seq_num) with
             | 1L , -1L (* TODO work-around to handle initial handshake *)
@@ -245,14 +251,11 @@ let handle_server (tls_state , (ic, (oc : Lwt_io.output_channel))) () =
               *)
               >>=fun()-> loop 2 ""
             | _ , d when d < 0L ->
-              (* ask client to resend*)
               Logs.debug (fun m ->
                   m "Asking client to resend %Ld as %Ld"
                     pkt_seq_num x.seq_num) ;
-              (* TODO xxx
-                 serialize_outgoing_ack Int32.(of_int conn_id (*TODO*)) `Resend pkt_seq_num x.seq_num
-                 |> Lwt_io.write oc
-                 >>=fun()-> *) loop 2 ""
+              serialize_outgoing_ack conn_id `Resend pkt_seq_num x.seq_num
+              |> Lwt_io.write oc >>= fun() -> loop 2 ""
             | _ , _ ->
               Logs.warn (fun m ->
                   m "OUTGOING - out of order transmitted seq_num: %Ld; \
@@ -264,7 +267,6 @@ let handle_server (tls_state , (ic, (oc : Lwt_io.output_channel))) () =
           Logs.debug (fun m ->
               m "QUEUE: conn_id: %ld seq_num: %Ld msg count: %d"
                 conn_id seq_num List.(length msgs)) ;
-          let conn_id = Int32.to_int conn_id in
           let x = Hashtbl.find connections conn_id in
           let rec add_q n = function
             | msg :: tl ->
@@ -314,13 +316,13 @@ let server_service listen_host listen_port
           return (`L ("unix: " ^ Unix.(error_message e) ^ f ^ p))
         | Tls_lwt.Tls_alert a -> return (`L (Tls.Packet.alert_type_to_string a))
         | Tls_lwt.Tls_failure f -> return (`L (Tls.Engine.string_of_failure f))
-        | _ (*exn*) -> return (`L "loop: exception")
+        | _ (*exn*) -> return (`L "server loop: exception")
       ) >>= function
     | `R (channels) ->
       let () = async (handle_server channels) in
       loop s
     | `L (msg) ->
-      Logs.err (fun m -> m "server fucked up: %s" msg) ;
+      Logs.err (fun m -> m "server listener error: %s" msg) ;
       loop s
   in loop s
   >>= fun () -> Logs.err (fun m -> m "quitting"); return (Some ())

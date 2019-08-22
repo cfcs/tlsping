@@ -6,4 +6,6 @@ PKG lwt.unix
 PKG hex
 PKG fmt
 PKG logs
-S lib
+PKG cmdliner
+S lib/
+B _build/
