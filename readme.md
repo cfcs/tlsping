@@ -178,10 +178,12 @@ The `proxy` only allows access to existing connections etablished in previous se
 #### Build
 
 ```
-opam install lwt rresult x509 cmdliner hex
-opam pin add socks --dev -k git 'https://github.com/cfcs/ocaml-socks#master'
+opam install alcotest cmdliner fmt hex logs lwt rresult x509
+opam pin add -n socks --dev -k git 'https://github.com/cfcs/ocaml-socks#master'
+opam pin add socks-lwt --dev -k git 'https://github.com/cfcs/ocaml-socks#master'
 opam pin add nocrypto --dev -k git 'https://github.com/mirleft/ocaml-nocrypto#master'
 opam pin add tls --dev -k git 'https://github.com/cfcs/ocaml-tls#expose_engine_state'
+dune build
 ```
 
 #### Certificates

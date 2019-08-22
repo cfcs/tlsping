@@ -1,0 +1,11 @@
+(library
+  (name tlsping)
+  (public_name tlsping)
+  (synopsis "TLSPING implementation")
+  (modules :standard)
+  (flags (:standard -safe-string))
+  (wrapped false)
+  (libraries logs.cli logs.fmt fmt.cli fmt.tty lwt.unix tls x509 tls.lwt
+             rresult)
+)
+

@@ -61,11 +61,16 @@ let connect_proxy client_out (host , port) certs =
           Lwt_unix.connect fd (ADDR_INET (proxy, port)) >>=fun()->
           Tls_lwt.Unix.client_of_fd config ~host:"proxy.example.org" fd (* TODO "proxy.example.org" should obviously be a parameter, testing only! *)
           >>= fun tls_t ->
-          Lwt_io.write client_out @@ Socks4.socks_response true >>=fun()->
+          Lwt_io.write client_out @@
+          (Socks.make_socks5_response
+            Succeeded ~bnd_port:0
+            (Domain_address host) |> R.get_ok) >>=fun()->
           (return @@ R.ok Tls_lwt.(of_t tls_t)))
       (function
         | Unix.Unix_error (Unix.ECONNREFUSED, f_n , _) ->
-          Lwt_io.write client_out @@ Socks4.socks_response false >>=fun()->
+          Lwt_io.write client_out @@ (Socks.make_socks5_response
+            Host_unreachable ~bnd_port:0
+            (Domain_address host) |> R.get_ok) >>=fun()->
           return @@ R.error @@ "Unix error: connection refused: " ^ f_n
         | Tls_lwt.Tls_failure err ->
           return @@ R.error @@
@@ -314,14 +319,15 @@ let handle_irc_client client_in client_out target proxy_details certs =
           | (`Handle_connect_response, (`Incoming _
                                        |`Outgoing_ACK _|`Status_answer _))
             ->  (* Handle invalid combinations of (state , received msg): *)
-            fatal @@ "invalid (parseable) msg received in state " ^ (string_of_state state) ^ "received: " ^ msg
+            fatal @@ "invalid (parseable) msg received in state "
+                     ^ (string_of_state state) ^ "received: " ^ msg
 
           | `Initial_status_answer , `Status_answer (ans:status_answer list) ->
             Lwt_list.iter_s
               (function ({conn_id ; ping_interval ; address ; port;
                          seq_num ; count_queued}:status_answer) ->
-                 if target.Socks4.address = address
-                 && (target:Socks4.socks4_request).port = port
+                 if (target:Socks.socks4_request).address = address
+                 && target.port = port
                  then begin
                    Logs.warn (fun m ->
                        m "FOUND EXISTING CONNECTION FOR SAME HOST \
@@ -347,7 +353,7 @@ let handle_irc_client client_in client_out target proxy_details certs =
               ans >>= fun () ->
             (*TODO: only if we don't have an existing state: *)
             (* Ask the proxy to connect to target.address: *)
-            let target : Socks4.socks4_request = target in
+            let target : Socks.socks4_request = target in
             begin match Tlsping.serialize_connect 20
                           (target.address, target.port) with
               | None ->
@@ -364,17 +370,35 @@ let handle_irc_client client_in client_out target proxy_details certs =
           | `Handle_connect_response , `Connect_answer (conn_id , _ , _)
             when conn_id = 0l -> (* if failed *)
             fatal @@ Printf.sprintf "error from proxy: no connect to \
-                                     %s" target.Socks4.address
+                                     %s" target.address
           (*TODO kill connection*)
           | `Handle_connect_response , `Connect_answer (conn_id , _ , _) ->
             Logs.debug (fun m -> m "=> Connect_answer conn_id %ld" conn_id) ;
             (* Initialize TLS connection from client -> target *)
-            X509_lwt.authenticator
-              (`Hex_key_fingerprints
-                 (`SHA256 ,
-                  [Domain_name.of_string_exn (target.Socks4.address),
-                   target.Socks4.username] ))
-            >>= fun authenticator ->
+            let authenticator : X509.Authenticator.t =
+              (* Do this dance instead of using X509_lwt.authenticator to
+                 allow using expired certificates as long as the key fp
+                 is correct: *)
+              (fun ?host certificate_list ->
+                 match List.map (fun c -> X509.Certificate.validity c |> snd)
+                         certificate_list with
+                 | [] -> Error `EmptyCertificateChain
+                 | first::_ as expiry_list ->
+                   let time = List.fold_left (fun acc than ->
+                       if Ptime.is_earlier acc ~than
+                       then acc else than) first expiry_list in
+                   match Ptime.sub_span time (Ptime.Span.of_int_s 1) with
+                   | Some time ->
+                     X509.Validation.trust_key_fingerprint ?host ~time
+                       ~hash:`SHA256
+                       ~fingerprints:[
+                         Domain_name.of_string_exn (target.address),
+                         Hex.to_cstruct (`Hex target.username)]
+                       certificate_list
+                   | None -> Error `InvalidChain
+                   (* shouldn't happen unless a cert has has expiry
+                      at Ptime epoch, which it shouldn't have. *)
+              ) in
             return @@ Tls.Config.client
               ~authenticator
               ~ciphers:[ `TLS_DHE_RSA_WITH_AES_256_CBC_SHA256
@@ -386,8 +410,8 @@ let handle_irc_client client_in client_out target proxy_details certs =
             >>= fun (tls_state, client_hello) ->
             (* Initiate a TLS connection: *)
             Hashtbl.add states conn_id {tls_state; outgoing = [] ;
-                                        address = target.Socks4.address ;
-                                        port = target.Socks4.port ;
+                                        address = target.address ;
+                                        port = target.port ;
                                         max_covered_sequence = 0L } ;
             Lwt_io.write proxy_out (serialize_outgoing conn_id 0L
                                       Cstruct.(to_string client_hello)
@@ -443,6 +467,7 @@ let handle_irc_client client_in client_out target proxy_details certs =
       failwith "TODO unhandled exit state\n"
   end
 
+(*
 let handle_client (unix_fd, sockaddr) proxy certs () =
   begin match sockaddr with
   | Lwt_unix.ADDR_INET ( _ (*inet_addr*), port) ->
@@ -450,8 +475,8 @@ let handle_client (unix_fd, sockaddr) proxy certs () =
     Lwt.return_unit
   | Lwt_unix.ADDR_UNIX _ -> return ()
   end >>= fun () ->
-  let client_in  = Lwt_io.of_fd Input  unix_fd
-  and client_out = Lwt_io.of_fd Output unix_fd in
+  let client_in  = Lwt_io.of_fd ~mode:Input  unix_fd
+  and client_out = Lwt_io.of_fd ~mode:Output unix_fd in
   Socks.receive_request client_in >>= function
   | `Invalid_fingerprint fp ->
     Logs.err (fun m -> m "socks4 handler: invalid sha256 fingerprint: %s"
@@ -459,37 +484,76 @@ let handle_client (unix_fd, sockaddr) proxy certs () =
   | `Invalid_request ->
     Logs.err (fun m -> m "invalid request!") ;
     Lwt.fail (Invalid_argument "invalid request!") (*TODO failwith / logging *)
-  | `Socks4 ({Socks4.port ; username; address } as target) ->
+  | `Socks4 ({Socks.port ; username; address } as target) ->
     Logs.debug (fun m -> m "got request for host '%s' port %d fp %s"
       address port username) ;
     handle_irc_client client_in client_out target proxy certs
+*)
 
-let listener_service (host,port) proxy certs =
+let socks_request_policy _server_fingerprint _TODO_proxy_and_certs
+  : 'a Socks_lwt.request_policy =
+  fun req ->
+    let open Lwt_result in
+  begin match req with
+  | `Socks4 req -> Lwt_result.return (req.address, req.port)
+  | `Socks5 Connect { address = Domain_address addr ; port } ->
+    Lwt_result.return (addr, port)
+  | _ -> Lwt_result.fail (`Msg "bad socks conn type")
+  end >>= fun (addr,port) ->
+  (* TODO make socks able to let us specify a custom setup function *)
+  let cb : Socks_lwt.client_data_cb =
+    (fun _data _channel -> Lwt.return_unit)
+  in
+  let open Lwt_result in
+  Lwt_result.ok (Lwt.return cb)
+
+let socks5_auth_policy proxy_and_certs : ('a,'b) Socks_lwt.auth_policy =
+  let validate_fp username =
+    (* tlsping uses the "user_id" field in socks4 to hold the hex-encoded
+       sha256 fingerprint of the x509 certificate of address:port
+    *)
+    if 64 <> String.length username
+    then Error (`Invalid_fingerprint username)
+    else try Ok (Hex.of_string username) with _ ->
+      Error (`Invalid_fingerprint username)
+  in
+  fun lst ->
+  if List.exists (function Socks.Username_password _ -> true
+                         | _ -> false) lst
+  then Lwt_result.return
+      (Socks.Username_password ("",""),
+       (function
+         | Socks.Username_password (username, _) ->
+           begin match validate_fp username with
+             | Ok fp ->
+               Lwt_result.return (socks_request_policy fp proxy_and_certs)
+             | _ -> Lwt_result.fail (`Msg "")
+           end
+         | _ -> Lwt_result.fail (`Msg "TODO")
+       ))
+  else Lwt_result.fail (`Msg "Not using username-password auth")
+
+let socks_address_policy proxy_and_certs : ('a,'b,'c) Socks_lwt.address_policy =
+  Socks_lwt.client_allow_localhost (socks5_auth_policy proxy_and_certs)
+
+let listener_service (host,port) proxy_and_certs =
   let open Lwt_unix in
   create_socket host >>= function
   | Error () -> failwith "unable to resolve listen addr"
   | Ok (s , host_inet_addr) ->
-  let () = setsockopt s SO_REUSEADDR true in
-  bind s (ADDR_INET (host_inet_addr, port )) >>= fun () ->
-  let () = listen s 10 in
-  let rec loop s =
-    Lwt.catch (fun () -> accept s >>= fun c -> return (`Client c))
-      (function
-        (*| Unix.Unix_error (e, f, p) -> return (`Error "e")*)
-        | _ -> return (`Error "exn")) >>= function
-    | `Client c ->
-      (Lwt.async (handle_client c proxy certs) ;
-       loop s)
-    | `Error _ -> failwith "listener failed, should retry"
-  in
-  loop s
+  Lwt_unix.close s >>= fun () ->
+  (*   let () = listen s 10 in TODO *)
+  (*(Lwt.async (handle_client c proxy certs) ;*)
+  let server = Socks_lwt.establish_server (ADDR_INET (host_inet_addr, port ))
+      (socks_address_policy proxy_and_certs) in
+  server
 
 let run_client () listen_host listen_port proxy_host proxy_port
     ca_public_cert client_public_cert client_secret_key =
   let listen = (listen_host , listen_port) in
   let proxy  = (proxy_host  , proxy_port) in
   let certs  = ca_public_cert , client_public_cert , client_secret_key in
-  Lwt_main.run (listener_service listen proxy certs)
+  Lwt_main.run (listener_service listen (proxy,certs))
 
 (***** cmdliner config *****)
 open Cmdliner

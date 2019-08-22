@@ -109,7 +109,6 @@ let handle_interval conn_id () =
                     m "UNABLE TO SEND PING FOR %s:%d, TODO kill connection"
                       x.address x.port) ;
                 Hashtbl.remove connections conn_id ;
-                Lwt_io.close x.ic >>= fun () ->
                 Lwt_io.close x.oc
               | seq_num , msg ->
                 Logs.warn (fun m ->
@@ -150,8 +149,8 @@ let cmd_connect tls_state client_oc (`Connect (interval , address , port)) =
     let us = { (* TODO tie this to the TLS client cert *)
       interval
     (* TODO interval http://ocsigen.org/lwt/2.5.0/api/Lwt_timeout *)
-    ; oc = Lwt_io.of_fd Output remote_fd
-    ; ic = Lwt_io.of_fd Input  remote_fd
+    ; oc = Lwt_io.of_fd ~mode:Output remote_fd
+    ; ic = Lwt_io.of_fd ~mode:Input  remote_fd
     ; last_output_time = Unix.time ()
     ; address
     ; port
@@ -197,19 +196,18 @@ let handle_server (tls_state , (ic, (oc : Lwt_io.output_channel))) () =
                 needed_len) ;
           loop needed_len msg
         | `Subscribe conn_id ->
-          match Hashtbl.find connections conn_id with
-          | exception Not_found ->
-            Logs.err (fun m -> m "Subscribe to nonregistered conn_id %ld"
-                         conn_id);
-            Lwt.return_unit
-          | x ->
-          if owner_fp_of_state tls_state = x.owner_fp then
-            (Lwt.async (handle_subscribe x.incoming_condition x.incoming oc) ;
-             loop 2 "")
-          else begin
-            Logs.warn (fun m ->
-                m "SUBSCRIBE: CAN'T SUBSCRIBE TO OTHER PERSON'S CONNECTION") ;
-            Lwt.return_unit
+          begin match Hashtbl.find connections conn_id with
+            | exception Not_found ->
+              Logs.err (fun m -> m "Subscribe to nonregistered conn_id %ld"
+                           conn_id);
+              Lwt.return_unit
+            | x when x.owner_fp = owner_fp_of_state tls_state ->
+              Lwt.async (handle_subscribe x.incoming_condition x.incoming oc) ;
+              loop 2 ""
+            | _ ->
+              Logs.warn (fun m ->
+                  m "SUBSCRIBE: CAN'T SUBSCRIBE TO OTHER PERSON'S CONNECTION") ;
+                Lwt.return_unit
           end
         | `Connect (ping_interval, address, port) as params ->
           Logs.debug (fun m ->
