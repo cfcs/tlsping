@@ -414,7 +414,10 @@ let create_socket host =
     let s = Lwt_unix.socket host_entry.h_addrtype SOCK_STREAM 0 in
     return @@ R.ok (s , host_inet_addr)
 
-type tls_config = {
+type proxy_tls_config = {
+  (* This is used only when connecting to the proxy, NOT the upstream server.
+     Both the client and the proxy use this to mutually authenticate each
+     other, which is why it lives in this shared module. *)
   authenticator : X509.Authenticator.t
 ; ciphers : Tls.Ciphersuite.ciphersuite list
 ; version : Tls.Core.tls_version * Tls.Core.tls_version
@@ -422,7 +425,7 @@ type tls_config = {
 ; certificates : Tls.Config.own_cert
 }
 
-let tls_config (ca_public_cert , public_cert , secret_key) =
+let proxy_tls_config (ca_public_cert , public_cert , secret_key) =
   let open Lwt in
   X509_lwt.authenticator (`Ca_file ca_public_cert) >>= fun authenticator ->
   X509_lwt.private_of_pems ~cert:public_cert
@@ -434,3 +437,181 @@ let tls_config (ca_public_cert , public_cert , secret_key) =
   ; hashes  = [`SHA256]
   ; certificates = (`Single cert)
   }
+
+let x509_fingerprint_authenticator_ignoring_time domain fingerprint
+  : X509.Authenticator.t =
+  (* Do this dance instead of using X509_lwt.authenticator to
+     allow using expired certificates as long as the key fp
+     is correct: *)
+  (fun ?host certificate_list ->
+     match List.map (fun c -> X509.Certificate.validity c |> snd)
+             certificate_list with
+     | [] -> Error `EmptyCertificateChain
+     | first::_ as expiry_list ->
+       let time = List.fold_left (fun acc than ->
+           if Ptime.is_earlier acc ~than
+           then acc else than) first expiry_list in
+       match Ptime.sub_span time (Ptime.Span.of_int_s 1) with
+       | Some time ->
+         X509.Validation.trust_key_fingerprint ?host ~time
+           ~hash:`SHA256
+           ~fingerprints:[
+             Domain_name.of_string_exn (domain),
+             Hex.to_cstruct (`Hex fingerprint)]
+           certificate_list
+       | None -> Error `InvalidChain
+       (* shouldn't happen unless a cert has has expiry
+          at Ptime epoch, which it shouldn't have. *)
+  )
+
+let deserialize_tls_state str : Tls.State.state =
+  (* we need to deserialize:
+     - handshake_session(s),
+     - current sequence numbers for either encryptor/decryptor
+     - fragment
+
+     we can derive the encryption keys from the session data
+     if we know which one is currently in use.
+     TODO atm we just assume the first entry.
+  *)
+  let custom_handshake_state_of_sexp
+    : Sexplib.Sexp.t -> Tls.State.handshake_state =
+    function
+    | Sexplib.Sexp.List
+        [ Atom "handshake_state" ;
+          List [Atom "session"; session ];
+          List [Atom "protocol_version" ; protocol_version ];
+          List [Atom "machina" ; machina ];
+          List [Atom "config" ; config ];
+          List [Atom "hs_fragment" ; hs_fragment ]
+        ] ->
+      let unsafe_config = Tls.Config.config_of_sexp config in
+      let peer_name = match unsafe_config.peer_name with
+        | None -> failwith "fuck no peer name"
+        | Some n -> n in
+      let config =
+        {unsafe_config with
+         authenticator =
+           Some (x509_fingerprint_authenticator_ignoring_time
+                   peer_name "")
+        } in
+      { session = Sexplib0.Sexp_conv.list_of_sexp
+            Tls.State.session_data_of_sexp session ;
+        protocol_version = Tls.Core.tls_version_of_sexp protocol_version ;
+        machina = Tls.State.handshake_machina_state_of_sexp machina ;
+        config ;
+        hs_fragment = Cstruct_sexp.t_of_sexp hs_fragment
+      }
+    | _ -> failwith "woops TODO"
+  in
+  let handshake, (enc_seq, dec_seq), fragment =
+    Sexplib0.Sexp_conv.triple_of_sexp
+      custom_handshake_state_of_sexp
+      (function Sexplib.Sexp.List
+          [Atom "sequence-numbers" ;
+           enc ; dec ] ->
+        Sexplib0.Sexp_conv.((option_of_sexp int64_of_sexp) enc,
+                            (option_of_sexp int64_of_sexp) dec)
+        | _ -> failwith "TODO sequence-numbers not found in x"
+      )
+      (function (List [Atom "fragment"; fragment]) ->
+         Cstruct_sexp.t_of_sexp fragment
+              | _ -> failwith "TODO fragment not found in sexp")
+      (Sexplib.Sexp.of_string str) in
+  let encryptor, decryptor =
+    match handshake.session with
+    | session::_TODO_tl ->
+      let enc, dec = Tls.Handshake_crypto.initialise_crypto_ctx
+          handshake.protocol_version session in
+      begin match enc_seq, dec_seq with
+        | Some sequence, None -> Some {enc with sequence}, Some dec
+        | None, Some sequence -> None, Some {dec with sequence}
+        | Some enc_seq, Some dec_seq ->
+          Some {enc with sequence = enc_seq},
+          Some {dec with sequence = dec_seq}
+        | None, None -> None, None
+      end
+    | [] -> None, None
+  in
+  { handshake ; encryptor; decryptor ; fragment}
+
+(* TODO serialize upstream TLS state so that we can resume at a later point.
+   we can roll forward the sequence numbers, but the crypto keys need to be
+   persisted somewhere.
+   TODO we probably need to restore the X509.Authenticator as well.
+*)
+let rec serialize_tls_state ?(sanity=true) (t:Tls.State.state) =
+  let custom_sexp_of_config : Tls.Config.config -> Sexplib.Sexp.t =
+    fun c ->
+      let c = {c with authenticator = None} in
+      (* Authentiator is a function, so sexp conversion is generally
+         not possible. Making it None here prevents the serializer from
+         calling the authenticator function (which throws an exception).
+         In our case we can just replace the authenticator on restore.
+      *)
+      Tls.Config.sexp_of_config c
+  in
+  let custom_sexp_of_handshake_state (h:Tls.State.handshake_state) =
+    (* This function is here because "config" cannot be serialized
+       automatically due to the authenticator field. *)
+    Sexplib.Sexp.List [
+      Atom "handshake_state" ;
+      List [Atom "session";
+            Sexplib0.Sexp_conv.sexp_of_list Tls.State.sexp_of_session_data
+              h.session ];
+      List [Atom "protocol_version" ;
+            Tls.Core.sexp_of_tls_version h.protocol_version ];
+      List [Atom "machina" ;
+            Tls.State.sexp_of_handshake_machina_state h.machina
+            (* TODO this will usually be Client Tls.State.client_handshake_state
+               depending on which state we are in, this will fail due to
+               cipher_st being unserializable:
+               | AwaitServerChangeCipherSpec of session_data *
+                 crypto_context * Cstruct_sexp.t * hs_log
+
+               | AwaitServerChangeCipherSpecResume of session_data *
+                 crypto_context * crypto_context * hs_log
+                looks like this can be reconstructed from state.config.cached_session
+                /epoch, see handshake_client.ml:124
+
+            *)
+           ];
+      List [Atom "config" ;
+            custom_sexp_of_config h.config ];
+      List [Atom "hs_fragment" ; Cstruct_sexp.sexp_of_t h.hs_fragment ]
+    ]
+  in
+  let serialized =
+    Sexplib0.Sexp_conv.sexp_of_triple
+      custom_sexp_of_handshake_state
+      (fun (enc, dec) ->
+         let sexp_of_sequence =
+           Sexplib0.Sexp_conv.sexp_of_option (fun {Tls.State.sequence; _} ->
+               Sexplib0.Sexp_conv.sexp_of_int64 sequence) in
+         List [Atom "sequence-numbers";
+               sexp_of_sequence enc ;
+               sexp_of_sequence dec
+              ])
+      (fun fragment -> List [Atom "fragment"; Cstruct_sexp.sexp_of_t fragment])
+      (t.handshake, (t.encryptor, t.decryptor), t.fragment) in
+  let str = Sexplib.Sexp.to_string_hum serialized in
+  Logs.debug (fun m -> m "Serialized TLS state: @[<v>%s@]\n\
+                          going to try deserializing" "[commented-out-for-brevity]" (*str*) ) ;
+  begin match t.handshake.machina with
+    | Client AwaitServerChangeCipherSpec _
+    | Client AwaitServerChangeCipherSpecResume _ ->
+      Logs.warn (fun m -> m "Client is in undeserializable state. TODO.")
+      (* see note in custom_sexp_of_handshake_state about unserializability
+         of these. TODO. *)
+    | _ ->
+      let t2 = deserialize_tls_state str in
+      if sanity then begin
+        let str2 = serialize_tls_state ~sanity:false t2 in
+        assert (str = str2) ; (* sanity check that we didn't lose information *)
+        Logs.debug (fun m -> m "woo hoo serializing tls state worked");
+      end
+  end ;
+  str
+
+
+(* TODO serialize outgoing/queue *)

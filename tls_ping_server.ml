@@ -1,6 +1,9 @@
 open Lwt
 open Tlsping
 
+let () =
+  Printexc.record_backtrace true
+
 type connection =
   { interval  : int
   ; oc        : Lwt_io.output_channel
@@ -285,8 +288,8 @@ let handle_server (tls_state , (ic, (oc : Lwt_io.output_channel))) () =
 let server_service listen_host listen_port
     (ca_public_cert : string) proxy_public_cert proxy_secret_key : unit option Lwt.t =
   let open Lwt_unix in
-  Tlsping.(tls_config (ca_public_cert , proxy_public_cert ,
-                       proxy_secret_key))
+  Tlsping.(proxy_tls_config (ca_public_cert , proxy_public_cert ,
+                             proxy_secret_key))
   >>= function {authenticator ; ciphers ; version ; hashes ; certificates} ->
     let config = Tls.Config.(server ~authenticator ~ciphers
                                ~version ~hashes ~certificates ()) in
