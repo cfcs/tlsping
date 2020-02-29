@@ -58,6 +58,34 @@ type status_answer =
     count_queued : int32 ;
   }
 
+
+type connect_answer_op = [`Op_connect_answer]
+type status_answer_op = [`Op_status_answer]
+type incoming_op = [`Op_incoming]
+type outgoing_ack_op = [`Op_outgoing_ack]
+type server_op_t = [ connect_answer_op | status_answer_op
+| incoming_op | outgoing_ack_op ]
+
+type server_op =
+  | Connect_answer_op_s :
+      { conn_id : int32 ;
+        address: string ;
+        port: int;
+      } -> server_op
+  | Status_answer_op_s :
+      status_answer list -> server_op
+  | Incoming_op_s :
+      { conn_id : int32;
+        next_seq_num: int64 ;
+        queued_seq_num: int64 ;
+        msg: string } -> server_op
+  | Outgoing_ack :
+      { conn_id : int32 ;
+        status : [`Ok | `Resend] ;
+        seq: int64 ;
+        next_seq: int64;
+      } -> server_op
+
 let pp_status_answer ppf v =
   Fmt.pf ppf "@[<v>conn_id: %ld@ ping_interval: %d@ address:%S@ port:%d@ \
               seq_num:%a@ count_queued:%ld@]"
@@ -377,6 +405,77 @@ let unserialized_of_server_msg msg =
 
   ) with | _ -> `Invalid `Invalid_packet
 
+
+let unserialized_of_server_msg_typed msg
+  (* TODO currently not used anywhere *)
+  : ( [`Need_more of int | `Parsed of server_op],
+      server_op_t option) result =
+  let emit v = Ok (`Parsed v) in
+  let open Rresult in
+  (* parses CONNECT_ANSWER ; INCOMING ; STATUS_ANSWER *)
+  match read_msg_len msg with
+  | `Need_more _ as ret -> Ok ret
+  | `Invalid `Too_long -> Error None
+  | `Payload payload ->
+    try (match server_operation_of_opcode payload.[0] with
+        | Connect_answer when String.length payload < (1+4+2+1) ->
+          Error (Some `Op_connect_answer)
+        | Connect_answer ->
+          let conn_id = ofle32 ~off:1 payload in
+          let port = ofle16 ~off:(1+4) payload in
+          let address = String.sub payload (1+4+2) (String.length payload-1-4-2) in
+          emit (Connect_answer_op_s {conn_id ; address; port})
+
+        | Incoming ->
+          let conn_id = ofle32 ~off:1 payload in
+          let next_seq_num = ofle64 ~off:(1+4) payload in
+          let queued_seq_num = ofle64 ~off:(1+4+8) payload in
+          let msg = String.sub payload (1+4+8+8) (String.length payload -1-4-8-8) in
+          emit (Incoming_op_s {conn_id ; next_seq_num ; queued_seq_num ; msg})
+
+        | Outgoing_ACK ->
+          let conn_id = ofle32 ~off:1 payload in
+          assert (conn_id <> 0l);
+          let status = ofle8 ~off:(1+4) payload in
+          assert (0 <= status && status <= 1);
+          let seq = ofle64 ~off:(1+4+1) payload in
+          let next_seq = ofle64 ~off:(1+4+1+8) payload in
+          let status =
+            begin match status with
+              | 0 -> `Ok
+              | 1 -> `Resend
+              | _ -> failwith "TODO should never happen" end
+          in emit (Outgoing_ack {conn_id ; status ; seq ; next_seq})
+
+        | Status_answer ->
+          let rec parse_tuples tuples acc =
+            if 0 = String.length tuples then
+              emit (Status_answer_op_s acc)
+            else
+              try (
+                let conn_id = ofle32 tuples in
+                let ping_interval = ofle16 ~off:4 tuples in (* in seconds *)
+                let port = ofle16 ~off:6 tuples in
+                let addr_len = ofle8 ~off:8 tuples in
+                let address = String.sub tuples 9 (addr_len) in
+                let seq_num = ofle64 ~off:(9+addr_len) tuples in
+                (* next write seq_num expected by the destination *)
+
+                let count_queued = ofle32 ~off:(9+addr_len+8) tuples in
+                (* amount of PINGs queued *)
+                let tail = String.sub tuples (9+addr_len+8+4)
+                    (String.length tuples-9-addr_len-8-4) in
+                parse_tuples
+                  (tail)
+                @@ {conn_id ; ping_interval ; address ; port ;
+                    seq_num ; count_queued} :: acc
+              ) with
+              | _ -> Error (Some `Op_status_answer)
+          in
+          parse_tuples (String.sub payload 1 (String.length payload-1)) []
+
+      ) with | _ -> Error None
+
 let pp_server_message ppf v : unit =
   let fmt_typ ppf v = Fmt.(styled `Cyan (styled `Underline string)) ppf v in
   match v with
@@ -456,7 +555,7 @@ let x509_fingerprint_authenticator_ignoring_time domain fingerprint
          X509.Validation.trust_key_fingerprint ?host ~time
            ~hash:`SHA256
            ~fingerprints:[
-             Domain_name.of_string_exn (domain),
+             Domain_name.of_string_exn (domain) |> Domain_name.host_exn,
              Hex.to_cstruct (`Hex fingerprint)]
            certificate_list
        | None -> Error `InvalidChain
@@ -538,7 +637,14 @@ let deserialize_tls_state str : Tls.State.state =
 (* TODO serialize upstream TLS state so that we can resume at a later point.
    we can roll forward the sequence numbers, but the crypto keys need to be
    persisted somewhere.
-   TODO we probably need to restore the X509.Authenticator as well.
+   - X509.Authenticator is to be restored manually.
+   - The unacked outgoing messages (client->proxy) will need to be stored too
+   - AwaitServerChangeCipherSpec | AwaitServerChangeCipherSpecResume
+     This state is not resumable, but we can cheat by storing the previous
+     state and incoming messages once a transition to this state is made.
+     We arrive in these states when we are in
+     states AwaitCertificateRequestOrServerHelloDone, or AwaitServerHelloDone
+     - We will need to also store any outgoing message not Outgoing_ACK'ed
 *)
 let rec serialize_tls_state ?(sanity=true) (t:Tls.State.state) =
   let custom_sexp_of_config : Tls.Config.config -> Sexplib.Sexp.t =
