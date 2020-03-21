@@ -226,12 +226,12 @@ Proxy: `ca.public.certificate`, `proxy.secret.key`, `proxy.public.certificate`
 
 Proxy machine:
 ```
-./tls_ping_server ./ca.public.certificate ./proxy.public.certificate ./proxy.secret.key
+./_build/default/tls_ping_server.exe ./ca.public.certificate ./proxy.public.certificate ./proxy.secret.key
 ```
 
 Client machine:
 ```
-./tls_ping_client 127.0.0.1 ./ca.public.certificate ./client.public.certificate ./client.secret.key &
-socat stdio socks4a:localhost:irc.example.org:6697,socksport=6697,socksuser=7e51d701e027bafa617c504dae989dd92a42273c3d8b6137a69b0d4741c9618f
+./_build/default/tls_ping_client.exe 127.0.0.1 ./ca.public.certificate ./client.public.certificate ./client.secret.key &
+socat stdio socks4a:localhost:irc.example.org:6697,socksport=6667,socksuser=7e51d701e027bafa617c504dae989dd92a42273c3d8b6137a69b0d4741c9618f
 ```
 
