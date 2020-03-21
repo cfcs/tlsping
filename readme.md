@@ -180,7 +180,7 @@ The `proxy` only allows access to existing connections etablished in previous se
 ```
 opam pin add -n socks --dev -k git 'https://github.com/cfcs/ocaml-socks#master'
 opam pin add -n socks-lwt --dev -k git 'https://github.com/cfcs/ocaml-socks#master'
-opam pin add -n tls --dev -k git 'https://github.com/cfcs/ocaml-tls#expose_engine_state'
+opam pin add -n tls.0.11.0 --dev -k git 'https://github.com/cfcs/ocaml-tls#expose_engine_state'
 opam install alcotest cmdliner fmt hex logs lwt rresult x509 tls socks socks-lwt
 dune build
 ```
