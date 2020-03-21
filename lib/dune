@@ -2,7 +2,7 @@
   (name tlsping)
   (public_name tlsping)
   (synopsis "TLSPING implementation")
-  (modules :standard)
+  (modules tlsping)
   (flags (:standard -safe-string))
   (wrapped false)
   (libraries logs.cli logs.fmt fmt.cli fmt.tty hex lwt.unix
@@ -11,4 +11,10 @@
   tls x509 tls.lwt
              rresult)
 )
+
+(tests
+  (names test_tlsping)
+  (modules test_tlsping)
+  (deps serialized_state.txt)
+  (libraries tlsping alcotest))
 
