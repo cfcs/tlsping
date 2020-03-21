@@ -189,7 +189,7 @@ dune build
 
 You will need some X509 certificates,
 generated using
-[ocaml-certify](https://github.com/yomimono/ocaml-certify) (`opam pin add certify 'https://github.com/hannesm/ocaml-certify#x509.0.9.0'`)or some other tool:
+[ocaml-certify](https://github.com/yomimono/ocaml-certify) (`opam pin add certify -k git 'https://github.com/hannesm/ocaml-certify#x509.0.9.0'`)or some other tool:
 - A CA ("Certificate Authority");
   two files: the secret _key_ (which may be kept on offline storage)
   and the public _certificate_ (which is used by both `client` and `proxy`)
