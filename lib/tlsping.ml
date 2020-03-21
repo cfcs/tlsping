@@ -520,7 +520,7 @@ type proxy_tls_config = {
   authenticator : X509.Authenticator.t
 ; ciphers : Tls.Ciphersuite.ciphersuite list
 ; version : Tls.Core.tls_version * Tls.Core.tls_version
-; hashes  : Nocrypto.Hash.hash list
+; hashes  : Mirage_crypto.Hash.hash list
 ; certificates : Tls.Config.own_cert
 }
 
@@ -542,7 +542,7 @@ let x509_fingerprint_authenticator_ignoring_time domain fingerprint
   (* Do this dance instead of using X509_lwt.authenticator to
      allow using expired certificates as long as the key fp
      is correct: *)
-  (fun ?host certificate_list ->
+  (fun ~host certificate_list ->
      match List.map (fun c -> X509.Certificate.validity c |> snd)
              certificate_list with
      | [] -> Error `EmptyCertificateChain
@@ -552,7 +552,7 @@ let x509_fingerprint_authenticator_ignoring_time domain fingerprint
            then acc else than) first expiry_list in
        match Ptime.sub_span time (Ptime.Span.of_int_s 1) with
        | Some time ->
-         X509.Validation.trust_key_fingerprint ?host ~time
+         X509.Validation.trust_key_fingerprint ~host ~time:(fun () -> Some time)
            ~hash:`SHA256
            ~fingerprints:[
              Domain_name.of_string_exn (domain) |> Domain_name.host_exn,
