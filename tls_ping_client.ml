@@ -528,7 +528,15 @@ let socks_request_policy server_fingerprint
   | `Socks5 Connect { address = Domain_address address ; port } ->
     Lwt_result.return ({address ; port;
                         username = server_fingerprint }:Socks.socks4_request)
-  | _ -> Lwt_result.fail (`Msg "bad socks conn type")
+  (* FIXME, if connect is to ip address, hostname is hardcoded *)
+  | `Socks5 Connect { address = IPv4_address address ; port } ->
+    Lwt_result.return ({address = "irc.indymedia.org" ; port;
+                        username = server_fingerprint }:Socks.socks4_request)
+  | `Socks5 Connect { address = IPv6_address address ; port } ->
+    Lwt_result.return ({address = "irc.indymedia.org" ; port;
+                        username = server_fingerprint }:Socks.socks4_request)
+  | `Socks5 Bind _ -> Lwt_result.fail (`Msg "socks5 bind not supported")
+  | `Socks5 UDP_associate _ -> Lwt_result.fail (`Msg "socks5 UDP_associate not supported")
   end >>= fun (target : Socks.socks4_request) ->
   (* TODO make socks able to let us specify a custom setup function *)
   let cb : Socks_lwt.client_data_cb =
