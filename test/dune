@@ -1,0 +1,14 @@
+(env
+  (dev
+    (flags (:standard -warn-error -A))))
+
+(library
+ (name ex_common)
+ (libraries lwt lwt.unix sexplib tls tls.lwt)
+ (modules ex_common))
+
+(executable
+ (name echo_server)
+ (modules echo_server)
+ (libraries tls.lwt lwt.unix ex_common))
+
