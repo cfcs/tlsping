@@ -530,11 +530,9 @@ let socks_request_policy server_fingerprint
                         username = server_fingerprint }:Socks.socks4_request)
   (* FIXME, if connect is to ip address, hostname is hardcoded *)
   | `Socks5 Connect { address = IPv4_address address ; port } ->
-    Lwt_result.return ({address = "irc.indymedia.org" ; port;
+    Lwt_result.return ({address = (Ipaddr.V4.to_string address) ; port;
                         username = server_fingerprint }:Socks.socks4_request)
-  | `Socks5 Connect { address = IPv6_address address ; port } ->
-    Lwt_result.return ({address = "irc.indymedia.org" ; port;
-                        username = server_fingerprint }:Socks.socks4_request)
+  | `Socks5 Connect { address = IPv6_address _; _ } -> Lwt_result.fail (`Msg "socks5 ipv6 not supported")
   | `Socks5 Bind _ -> Lwt_result.fail (`Msg "socks5 bind not supported")
   | `Socks5 UDP_associate _ -> Lwt_result.fail (`Msg "socks5 UDP_associate not supported")
   end >>= fun (target : Socks.socks4_request) ->
