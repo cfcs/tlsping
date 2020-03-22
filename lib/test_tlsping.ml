@@ -11,7 +11,7 @@ let read_file filename =
 let write_file filename str =
   let oc = open_out filename in
   Logs.debug (fun m -> m "wrote debug file");
-  fprintf oc "%s" str;   
+output_string oc str ;
   close_out oc
 
 
