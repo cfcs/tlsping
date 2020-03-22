@@ -1,3 +1,8 @@
+(env
+  (dev
+    (flags (:standard -warn-error -A))))
+
+
 (executable
   (name		tls_ping_client)
   (public_name	tls_ping_client)
@@ -13,3 +18,5 @@
   (modules	tls_ping_server)
   (libraries	cmdliner hex tlsping tls)
 )
+
+
