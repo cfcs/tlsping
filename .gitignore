@@ -9,3 +9,11 @@ _build/
 *.native
 *.install
 .merlin
+*.csr
+_test
+*.native
+*.install
+.merlin
+*.swp
+*.swo
+
