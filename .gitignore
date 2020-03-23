@@ -16,4 +16,6 @@ _test
 .merlin
 *.swp
 *.swo
+testscript/weechatconf
+_wtf
 
